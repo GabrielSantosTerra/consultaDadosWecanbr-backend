@@ -1,0 +1,36 @@
+# Bytecode e caches
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Logs e arquivos temporários
+*.log
+*.tmp
+*.swp
+*.bak
+
+# Arquivos de ambiente
+.env
+.env.*
+
+# Ambiente virtual
+venv/
+.venv/
+
+# IDEs e editores
+.vscode/
+.idea/
+*.code-workspace
+
+# Arquivos do sistema
+.DS_Store
+Thumbs.db
+
+# Bancos temporários
+*.sqlite3
+
+# Arquivos de testes
+coverage/
+htmlcov/
+.tox/
+.pytest_cache/
