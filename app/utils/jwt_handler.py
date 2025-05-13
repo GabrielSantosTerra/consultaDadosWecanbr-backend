@@ -1,8 +1,11 @@
 # app/utils/jwt_handler.py
 from jose import jwt, JWTError
+import os
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
 
-SECRET_KEY = "chave-muito-secreta"
+load_dotenv()
+SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
 
 def criar_token(payload: dict, expires_in: int):
