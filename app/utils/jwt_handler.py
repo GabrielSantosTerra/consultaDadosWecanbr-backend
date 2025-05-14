@@ -1,21 +1,15 @@
-# app/utils/jwt_handler.py
-from jose import jwt, JWTError
-import os
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
+from jose import jwt, JWTError
+from config.settings import settings
 
-load_dotenv()
-SECRET_KEY = os.getenv("SECRET_KEY")
-ALGORITHM = "HS256"
-
-def criar_token(payload: dict, expires_in: int):
-    exp = datetime.utcnow() + timedelta(minutes=expires_in)
-    payload.update({"exp": exp})
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+def criar_token(data: dict, expires_in: int):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=expires_in)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 def verificar_token(token: str):
     try:
-        decoded = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return decoded
+        return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
     except JWTError:
         return None
