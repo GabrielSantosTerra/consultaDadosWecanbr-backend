@@ -91,12 +91,16 @@ def refresh_token(request: Request, db: Session = Depends(get_db)):
     if not payload or payload.get("tipo") != "refresh":
         raise HTTPException(status_code=401, detail="refreshToken inválido ou expirado")
 
-    pessoa = db.query(Pessoa).filter(Pessoa.id == payload.get("id")).first()
-    if not pessoa:
+    email = payload.get("sub")
+    if not email:
+        raise HTTPException(status_code=401, detail="Token inválido")
+
+    usuario = db.query(Usuario).filter(Usuario.email == email).first()
+    if not usuario:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
 
-    novo_auth = criar_token({"id": pessoa.id}, expires_in=2)
-    novo_logged = criar_token({"logged": True}, expires_in=2)
+    novo_auth = criar_token({"sub": usuario.email}, expires_in=15)
+    novo_logged = criar_token({"logged": True}, expires_in=15)
 
     response = JSONResponse(content={"message": "Token renovado"})
     response.set_cookie("access_token", novo_auth, httponly=True, path="/")
