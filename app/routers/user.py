@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from datetime import timedelta
@@ -46,14 +46,14 @@ def login(payload: UsuarioLogin, db: Session = Depends(get_db)):
     pessoa = db.query(Pessoa).filter(Pessoa.id == usuario.id_pessoa).first()
 
     # Tokens
-    auth_token = criar_token({"id": pessoa.id}, expires_in=2)
-    refresh_token = criar_token({"id": pessoa.id, "tipo": "refresh"}, expires_in=10)
-    logged_token = criar_token({"logged": True}, expires_in=2)
+    auth_token = criar_token({"id": pessoa.id}, expires_in=60 * 24 * 7)  # 7 dias
+    refresh_token = criar_token({"id": pessoa.id, "tipo": "refresh"}, expires_in=60 * 24 * 30)  # 30 dias
+    logged_token = criar_token({"logged": True}, expires_in=60 * 24 * 7)  # 7 dias
 
     response = JSONResponse(content={"message": "Login com sucesso"})
-    response.set_cookie("access_token", auth_token, httponly=True, path="/")
-    response.set_cookie("refresh_token", refresh_token, httponly=True, path="/")
-    response.set_cookie("logged_user", logged_token, httponly=True, path="/")
+    response.set_cookie("access_token", auth_token, httponly=True, path="/", max_age=60 * 60 * 24 * 7)
+    response.set_cookie("refresh_token", refresh_token, httponly=True, path="/", max_age=60 * 60 * 24 * 30)
+    response.set_cookie("logged_user", logged_token, httponly=True, path="/", max_age=60 * 60 * 24 * 7)
 
     return response
 
@@ -99,11 +99,18 @@ def refresh_token(request: Request, db: Session = Depends(get_db)):
     if not usuario:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
 
-    novo_auth = criar_token({"sub": usuario.email}, expires_in=15)
-    novo_logged = criar_token({"logged": True}, expires_in=15)
+    novo_auth = criar_token({"sub": usuario.email}, expires_in=60 * 24 * 7)
+    novo_logged = criar_token({"logged": True}, expires_in=60 * 24 * 7)
 
     response = JSONResponse(content={"message": "Token renovado"})
-    response.set_cookie("access_token", novo_auth, httponly=True, path="/")
-    response.set_cookie("logged_user", novo_logged, httponly=True, path="/")
+    response.set_cookie("access_token", novo_auth, httponly=True, path="/", max_age=60 * 60 * 24 * 7)
+    response.set_cookie("logged_user", novo_logged, httponly=True, path="/", max_age=60 * 60 * 24 * 7)
 
     return response
+
+@router.post("/user/logout")
+def logout(response: Response):
+    response.delete_cookie("access_token", path="/")
+    response.delete_cookie("refresh_token", path="/")
+    response.delete_cookie("logged_user", path="/")
+    return {"message": "Logout realizado com sucesso"}
