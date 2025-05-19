@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from datetime import timedelta
 
+from app.utils.password import gerar_hash_senha, verificar_senha  # <-- adiciona
 from app.database.connection import get_db
 from app.models.user import Usuario, Pessoa
 from app.schemas.user import CadastroPessoa, UsuarioLogin, PessoaResponse
@@ -20,13 +21,18 @@ def registrar_usuario(payload: CadastroPessoa, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(pessoa)
 
-    usuario = Usuario(
-        id_pessoa=pessoa.id,
-        email=payload.usuario.email,
-        senha=payload.usuario.senha
-    )
-    db.add(usuario)
-    db.commit()
+    try:
+        usuario = Usuario(
+            id_pessoa=pessoa.id,
+            email=payload.usuario.email,
+            senha=gerar_hash_senha(payload.usuario.senha)
+        )
+        db.add(usuario)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print("[ERRO] Falha ao salvar usuário:", e)
+        raise HTTPException(status_code=500, detail="Erro ao salvar usuário")
 
     return PessoaResponse(
         nome=pessoa.nome,
@@ -35,12 +41,12 @@ def registrar_usuario(payload: CadastroPessoa, db: Session = Depends(get_db)):
         cliente=pessoa.cliente,
         email=usuario.email
     )
-
 @router.post("/user/login")
 def login(payload: UsuarioLogin, db: Session = Depends(get_db)):
     usuario = db.query(Usuario).filter(Usuario.email == payload.email).first()
 
-    if not usuario or usuario.senha != payload.senha:
+    # <-- compara usando hash
+    if not usuario or not verificar_senha(payload.senha, usuario.senha):
         raise HTTPException(status_code=401, detail="Email ou senha inválidos")
 
     pessoa = db.query(Pessoa).filter(Pessoa.id == usuario.id_pessoa).first()
