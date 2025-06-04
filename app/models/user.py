@@ -1,10 +1,10 @@
-# app/models/user.py
 from sqlalchemy import Column, Integer, String, ForeignKey
+
 from app.database.connection import Base
 
 class Pessoa(Base):
-    __tablename__ = "tb_pessoa"  # <- nome da tabela alterado
-    __table_args__ = {"schema": "app_rh"}  # <-- mantém no schema correto
+    __tablename__ = "tb_pessoa"
+    __table_args__ = {"schema": "app_rh"}
 
     id = Column(Integer, primary_key=True, index=True)
     nome = Column(String(100), nullable=False)

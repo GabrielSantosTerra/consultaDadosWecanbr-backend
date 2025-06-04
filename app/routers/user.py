@@ -27,7 +27,7 @@ def registrar_usuario(payload: CadastroPessoa, db: Session = Depends(get_db)):
             email=payload.usuario.email,
             senha=gerar_hash_senha(payload.usuario.senha)
         )
-        db.add(usuario)
+        db.add(usuario) 
         db.commit()
     except Exception as e:
         db.rollback()
@@ -52,9 +52,9 @@ def login(payload: UsuarioLogin, db: Session = Depends(get_db)):
     pessoa = db.query(Pessoa).filter(Pessoa.id == usuario.id_pessoa).first()
 
     # Tokens
-    auth_token = criar_token({"id": pessoa.id}, expires_in=60 * 24 * 7)  # 7 dias
-    refresh_token = criar_token({"id": pessoa.id, "tipo": "refresh"}, expires_in=60 * 24 * 30)  # 30 dias
-    logged_token = criar_token({"logged": True}, expires_in=60 * 24 * 7)  # 7 dias
+    auth_token = criar_token({"id": pessoa.id}, expires_in=60 * 24 * 7)
+    refresh_token = criar_token({"id": pessoa.id, "tipo": "refresh"}, expires_in=60 * 24 * 30)
+    logged_token = criar_token({"logged": True}, expires_in=60 * 24 * 7)
 
     response = JSONResponse(content={"message": "Login com sucesso"})
     response.set_cookie("access_token", auth_token, httponly=True, path="/", max_age=60 * 60 * 24 * 7)

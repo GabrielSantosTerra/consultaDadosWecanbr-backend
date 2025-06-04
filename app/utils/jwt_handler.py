@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from jose import jwt, JWTError
+
 from config.settings import settings
 
 def criar_token(data: dict, expires_in: int):

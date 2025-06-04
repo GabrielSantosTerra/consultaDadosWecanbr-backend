@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     EMAIL_USE_SSL: bool = True
     EMAIL_SENDER: str
 
+    # 🔽 Adicione estes:
+    GED_CONTA: str
+    GED_USUARIO: str
+    GED_SENHA: str
+
     class Config:
         env_file = ".env"
 
