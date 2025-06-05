@@ -3,8 +3,9 @@ from typing import Any
 import requests
 from pydantic import BaseModel
 from fastapi.responses import JSONResponse
-
-from config.settings import settings  # Garante que o .env esteja carregado corretamente
+import fitz
+import base64
+from config.settings import settings
 
 router = APIRouter()
 
@@ -243,3 +244,55 @@ def baixar_documento(payload: DownloadDocumentoPayload):
             "erro": False,
             "base64_raw": response.text  # pode ser o próprio base64 direto
         }
+
+@router.post("/searchdocuments/download_image")
+def baixar_documento_convertido(payload: DownloadDocumentoPayload):
+    auth_key = login(
+        conta=settings.GED_CONTA,
+        usuario=settings.GED_USUARIO,
+        senha=settings.GED_SENHA
+    )
+
+    headers = {
+        "Authorization": auth_key,
+        "Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-1"
+    }
+
+    data = {
+        "id_tipo": payload.id_tipo,
+        "id_documento": payload.id_documento
+    }
+
+    response = requests.post(
+        f"{BASE_URL}/documents/download",
+        headers=headers,
+        data=data
+    )
+
+    if response.status_code != 200:
+        raise HTTPException(status_code=response.status_code, detail=f"Erro {response.status_code}: {response.text}")
+
+    try:
+        # Tenta interpretar como JSON (caso venha como {"base64": "..."})
+        try:
+            base64_pdf = response.json().get("base64")
+        except ValueError:
+            base64_pdf = response.text
+
+        if not base64_pdf:
+            raise HTTPException(status_code=500, detail="Base64 do PDF não encontrado")
+
+        # Decodifica base64 do PDF
+        pdf_bytes = base64.b64decode(base64_pdf)
+
+        # Abre PDF em memória e renderiza primeira página como imagem JPEG
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        page = doc.load_page(0)
+        pix = page.get_pixmap(dpi=150)
+        img_bytes = pix.tobytes("jpeg")
+        img_base64 = base64.b64encode(img_bytes).decode("utf-8")
+
+        return JSONResponse(content={"image_base64": img_base64})
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao processar PDF: {str(e)}")
