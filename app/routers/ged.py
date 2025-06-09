@@ -3,9 +3,11 @@ from typing import Any
 import requests
 from pydantic import BaseModel
 from fastapi.responses import JSONResponse
-import fitz
 import base64
 from config.settings import settings
+from io import BytesIO
+from pdf2image import convert_from_bytes
+from PIL import Image
 
 router = APIRouter()
 
@@ -255,7 +257,7 @@ def baixar_documento_convertido(payload: DownloadDocumentoPayload):
 
     headers = {
         "Authorization": auth_key,
-        "Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-1"
+        "Content-Type": "application/x-www-form-urlencoded"
     }
 
     data = {
@@ -263,36 +265,24 @@ def baixar_documento_convertido(payload: DownloadDocumentoPayload):
         "id_documento": payload.id_documento
     }
 
-    response = requests.post(
-        f"{BASE_URL}/documents/download",
-        headers=headers,
-        data=data
-    )
+    response = requests.post(f"{BASE_URL}/documents/download", headers=headers, data=data)
 
     if response.status_code != 200:
-        raise HTTPException(status_code=response.status_code, detail=f"Erro {response.status_code}: {response.text}")
+        raise HTTPException(status_code=500, detail="Erro ao baixar documento")
 
     try:
-        # Tenta interpretar como JSON (caso venha como {"base64": "..."})
-        try:
-            base64_pdf = response.json().get("base64")
-        except ValueError:
-            base64_pdf = response.text
+        pdf_bytes = base64.b64decode(response.text)  # base64 vem direto como string
 
-        if not base64_pdf:
-            raise HTTPException(status_code=500, detail="Base64 do PDF não encontrado")
+        # Poppler path
+        images = convert_from_bytes(pdf_bytes, poppler_path=r"C:\poppler-24.08.0\Library\bin")
+        first_image = images[0]
 
-        # Decodifica base64 do PDF
-        pdf_bytes = base64.b64decode(base64_pdf)
-
-        # Abre PDF em memória e renderiza primeira página como imagem JPEG
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        page = doc.load_page(0)
-        pix = page.get_pixmap(dpi=150)
-        img_bytes = pix.tobytes("jpeg")
-        img_base64 = base64.b64encode(img_bytes).decode("utf-8")
+        # Converte para base64
+        buffer = BytesIO()
+        first_image.save(buffer, format="JPEG")
+        img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
 
         return JSONResponse(content={"image_base64": img_base64})
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao processar PDF: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erro ao converter PDF para imagem: {str(e)}")
