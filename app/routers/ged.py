@@ -123,17 +123,24 @@ def listar_todos_arquivos_por_template(id_tipo: int = Form(...)):
     response = requests.post(f"{BASE_URL}/documents/search", headers=headers, data=payload)
 
     if response.status_code != 200:
-        raise HTTPException(status_code=500, detail="Erro ao buscar documentos")
+        return JSONResponse(
+            status_code=response.status_code,
+            content={"error": "Erro na requisição", "status_code": response.status_code, "body": response.text}
+        )
 
-    data = response.json()
+    try:
+        data = response.json()
+        for doc in data.get("documents", []):
+            attributes = doc.pop("attributes", [])
+            for attr in attributes:
+                doc[attr["name"]] = attr["value"]
+        return JSONResponse(content=data)
 
-    # Reestrutura os atributos dentro de cada documento
-    for doc in data.get("documents", []):
-        attributes = doc.pop("attributes", [])
-        for attr in attributes:
-            doc[attr["name"]] = attr["value"]
-
-    return JSONResponse(content=data)
+    except Exception:
+        return JSONResponse(
+            status_code=200,
+            content={"warning": "Resposta não está em JSON", "raw": response.text}
+        )
 
 @router.post("/searchdocuments/documents")
 def buscar_documento_por_campo(payload: BuscaDocumentoCampo):
