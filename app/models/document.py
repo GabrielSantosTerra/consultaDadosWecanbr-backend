@@ -7,4 +7,3 @@ class TipoDocumento(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     nome = Column(String, nullable=False)
-    tipodoc = Column(String, nullable=False)
