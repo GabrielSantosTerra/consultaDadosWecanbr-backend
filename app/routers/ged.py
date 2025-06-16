@@ -288,8 +288,9 @@ def baixar_documento_convertido(payload: DownloadDocumentoPayload):
         buffer = BytesIO()
         first_image.save(buffer, format="JPEG")
         img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-
+        print(img_base64)
         return JSONResponse(content={"image_base64": img_base64})
+        
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao converter PDF para imagem: {str(e)}")
