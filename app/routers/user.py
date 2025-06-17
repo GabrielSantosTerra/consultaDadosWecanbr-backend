@@ -57,9 +57,9 @@ def login(payload: UsuarioLogin, db: Session = Depends(get_db)):
     logged_token = criar_token({"logged": True}, expires_in=60 * 24 * 7)
 
     response = JSONResponse(content={"message": "Login com sucesso"})
-    response.set_cookie("access_token", auth_token, httponly=True, path="/", max_age=60 * 60 * 24 * 7)
-    response.set_cookie("refresh_token", refresh_token, httponly=True, path="/", max_age=60 * 60 * 24 * 30)
-    response.set_cookie("logged_user", logged_token, httponly=True, path="/", max_age=60 * 60 * 24 * 7)
+    response.set_cookie("access_token", auth_token, httponly=True, path="/", max_age=60 * 60 * 24 * 7, secure=True, samesite="None")
+    response.set_cookie("refresh_token", refresh_token, httponly=True, path="/", max_age=60 * 60 * 24 * 30, secure=True, samesite="None")
+    response.set_cookie("logged_user", logged_token, httponly=True, path="/", max_age=60 * 60 * 24 * 7, secure=True, samesite="None")
 
     return response
 
@@ -109,14 +109,15 @@ def refresh_token(request: Request, db: Session = Depends(get_db)):
     novo_logged = criar_token({"logged": True}, expires_in=60 * 24 * 7)
 
     response = JSONResponse(content={"message": "Token renovado"})
-    response.set_cookie("access_token", novo_auth, httponly=True, path="/", max_age=60 * 60 * 24 * 7)
-    response.set_cookie("logged_user", novo_logged, httponly=True, path="/", max_age=60 * 60 * 24 * 7)
+    response.set_cookie("access_token", novo_auth, httponly=True, path="/", max_age=60 * 60 * 24 * 7, secure=True, samesite="None")
+    response.set_cookie("logged_user", novo_logged, httponly=True, path="/", max_age=60 * 60 * 24 * 7, secure=True, samesite="None")
 
     return response
 
 @router.post("/user/logout")
 def logout(response: Response):
-    response.delete_cookie("access_token", path="/")
-    response.delete_cookie("refresh_token", path="/")
-    response.delete_cookie("logged_user", path="/")
+    response.delete_cookie("access_token", path="/", samesite="None", secure=True)
+    response.delete_cookie("refresh_token", path="/", samesite="None", secure=True)
+    response.delete_cookie("logged_user", path="/", samesite="None", secure=True)
+
     return {"message": "Logout realizado com sucesso"}
