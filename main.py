@@ -12,12 +12,10 @@ user.Base.metadata.create_all(bind=engine)
 app = FastAPI()
 
 # ✅ Configuração CORS para frontend local e produção Firebase Hosting
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",            # desenvolvimento local
-        "https://docrh-615cf.web.app"       # produção (Firebase Hosting)
-    ],
+    allow_origins=["https://docrh-615cf.web.app"],  # Domínio exato do Firebase Hosting
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
