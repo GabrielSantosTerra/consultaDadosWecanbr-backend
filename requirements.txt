@@ -9,3 +9,4 @@ python-jose
 requests
 pdf2image
 Pillow
+psycopg2
