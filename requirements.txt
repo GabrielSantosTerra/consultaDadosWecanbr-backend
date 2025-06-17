@@ -10,3 +10,4 @@ requests
 pdf2image
 Pillow
 psycopg2
+python-multipart
