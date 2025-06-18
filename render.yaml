@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: docrh
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
+    build:
+      buildCommand: pip install -r requirements.txt
+      buildpacks:
+        - https://github.com/render-examples/poppler-buildpack.git
+    envVars:
+      - key: PORT
+        value: 10000
