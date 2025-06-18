@@ -281,7 +281,7 @@ def baixar_documento_convertido(payload: DownloadDocumentoPayload):
         pdf_bytes = base64.b64decode(response.text)  # base64 vem direto como string
 
         # Poppler path
-        images = convert_from_bytes(pdf_bytes, poppler_path=r"C:\poppler-24.08.0\Library\bin")
+        images = convert_from_bytes(pdf_bytes)
         first_image = images[0]
 
         # Converte para base64
