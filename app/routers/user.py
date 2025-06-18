@@ -14,6 +14,7 @@ router = APIRouter()
 
 @router.post("/user/register", response_model=PessoaResponse)
 def registrar_usuario(payload: CadastroPessoa, db: Session = Depends(get_db)):
+    print("Requisição recebida:", payload)
     if db.query(Usuario).filter(Usuario.email == payload.usuario.email).first():
         raise HTTPException(status_code=400, detail="Email já cadastrado")
 
