@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from datetime import timedelta
+import re
 
 from app.utils.password import gerar_hash_senha, verificar_senha  # <-- adiciona
 from app.database.connection import get_db
@@ -27,7 +28,7 @@ def registrar_usuario(payload: CadastroPessoa, db: Session = Depends(get_db)):
             email=payload.usuario.email,
             senha=gerar_hash_senha(payload.usuario.senha)
         )
-        db.add(usuario) 
+        db.add(usuario)
         db.commit()
     except Exception as e:
         db.rollback()
@@ -41,17 +42,25 @@ def registrar_usuario(payload: CadastroPessoa, db: Session = Depends(get_db)):
         cliente=pessoa.cliente,
         email=usuario.email
     )
+
 @router.post("/user/login")
 def login(payload: UsuarioLogin, db: Session = Depends(get_db)):
-    usuario = db.query(Usuario).filter(Usuario.email == payload.email).first()
+    def is_email(valor: str) -> bool:
+        return re.match(r"[^@]+@[^@]+\.[^@]+", valor) is not None
 
-    # <-- compara usando hash
+    if is_email(payload.usuario):
+        usuario = db.query(Usuario).filter(Usuario.email == payload.usuario).first()
+    else:
+        pessoa = db.query(Pessoa).filter(Pessoa.cpf == payload.usuario).first()
+        if not pessoa:
+            raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
+        usuario = db.query(Usuario).filter(Usuario.id_pessoa == pessoa.id).first()
+
     if not usuario or not verificar_senha(payload.senha, usuario.senha):
-        raise HTTPException(status_code=401, detail="Email ou senha inválidos")
+        raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
 
     pessoa = db.query(Pessoa).filter(Pessoa.id == usuario.id_pessoa).first()
 
-    # Tokens
     auth_token = criar_token({"id": pessoa.id}, expires_in=60 * 24 * 7)
     refresh_token = criar_token({"id": pessoa.id, "tipo": "refresh"}, expires_in=60 * 24 * 30)
     logged_token = criar_token({"logged": True}, expires_in=60 * 24 * 7)

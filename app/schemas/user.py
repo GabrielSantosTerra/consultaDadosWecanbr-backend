@@ -15,9 +15,8 @@ class CadastroPessoa(BaseModel):
     usuario: UsuarioBase
 
 class UsuarioLogin(BaseModel):
-    email: EmailStr
+    usuario: str  # email ou cpf
     senha: str
-
 class PessoaResponse(BaseModel):
     nome: str
     cpf: str
