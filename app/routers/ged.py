@@ -254,43 +254,43 @@ def baixar_documento(payload: DownloadDocumentoPayload):
             "base64_raw": response.text  # pode ser o próprio base64 direto
         }
 
-@router.post("/searchdocuments/download_image")
-def baixar_documento_convertido(payload: DownloadDocumentoPayload):
-    auth_key = login(
-        conta=settings.GED_CONTA,
-        usuario=settings.GED_USUARIO,
-        senha=settings.GED_SENHA
-    )
+# @router.post("/searchdocuments/download_image")
+# def baixar_documento_convertido(payload: DownloadDocumentoPayload):
+#     auth_key = login(
+#         conta=settings.GED_CONTA,
+#         usuario=settings.GED_USUARIO,
+#         senha=settings.GED_SENHA
+#     )
 
-    headers = {
-        "Authorization": auth_key,
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
+#     headers = {
+#         "Authorization": auth_key,
+#         "Content-Type": "application/x-www-form-urlencoded"
+#     }
 
-    data = {
-        "id_tipo": payload.id_tipo,
-        "id_documento": payload.id_documento
-    }
+#     data = {
+#         "id_tipo": payload.id_tipo,
+#         "id_documento": payload.id_documento
+#     }
 
-    response = requests.post(f"{BASE_URL}/documents/download", headers=headers, data=data)
+#     response = requests.post(f"{BASE_URL}/documents/download", headers=headers, data=data)
 
-    if response.status_code != 200:
-        raise HTTPException(status_code=500, detail="Erro ao baixar documento")
+#     if response.status_code != 200:
+#         raise HTTPException(status_code=500, detail="Erro ao baixar documento")
 
-    try:
-        pdf_bytes = base64.b64decode(response.text)  # base64 vem direto como string
+#     try:
+#         pdf_bytes = base64.b64decode(response.text)  # base64 vem direto como string
 
-        # Poppler path
-        images = convert_from_bytes(pdf_bytes)
-        first_image = images[0]
+#         # Poppler path
+#         images = convert_from_bytes(pdf_bytes, poppler_path=r"C:\poppler-24.08.0\Library\bin")
+#         first_image = images[0]
 
-        # Converte para base64
-        buffer = BytesIO()
-        first_image.save(buffer, format="JPEG")
-        img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-        print(img_base64)
-        return JSONResponse(content={"image_base64": img_base64})
+#         # Converte para base64
+#         buffer = BytesIO()
+#         first_image.save(buffer, format="JPEG")
+#         img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+#         print(img_base64)
+#         return JSONResponse(content={"image_base64": img_base64})
         
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao converter PDF para imagem: {str(e)}")
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=f"Erro ao converter PDF para imagem: {str(e)}")
