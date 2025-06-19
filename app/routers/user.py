@@ -7,7 +7,7 @@ import re
 from app.utils.password import gerar_hash_senha, verificar_senha  # <-- adiciona
 from app.database.connection import get_db
 from app.models.user import Usuario, Pessoa
-from app.schemas.user import CadastroPessoa, UsuarioLogin, PessoaResponse
+from app.schemas.user import CadastroPessoa, UsuarioLogin, PessoaResponse, CadastroColaborador, ColabResponse
 from app.utils.jwt_handler import criar_token, verificar_token
 
 router = APIRouter()
@@ -17,7 +17,10 @@ def registrar_usuario(payload: CadastroPessoa, db: Session = Depends(get_db)):
     if db.query(Usuario).filter(Usuario.email == payload.usuario.email).first():
         raise HTTPException(status_code=400, detail="Email já cadastrado")
 
-    pessoa = Pessoa(**payload.pessoa.dict())
+    pessoa = Pessoa(
+        nome=payload.pessoa.nome,
+        cpf=payload.pessoa.cpf,
+    )
     db.add(pessoa)
     db.commit()
     db.refresh(pessoa)
@@ -30,16 +33,44 @@ def registrar_usuario(payload: CadastroPessoa, db: Session = Depends(get_db)):
         )
         db.add(usuario)
         db.commit()
-    except Exception as e:
+    except Exception:
         db.rollback()
-        print("[ERRO] Falha ao salvar usuário:", e)
         raise HTTPException(status_code=500, detail="Erro ao salvar usuário")
 
     return PessoaResponse(
         nome=pessoa.nome,
         cpf=pessoa.cpf,
-        empresa=pessoa.empresa,
-        cliente=pessoa.cliente,
+        email=usuario.email
+    )
+
+@router.post("/user/register_colab", response_model=ColabResponse)
+def registrar_colaborador(payload: CadastroColaborador, db: Session = Depends(get_db)):
+    if db.query(Usuario).filter(Usuario.email == payload.usuario.email).first():
+        raise HTTPException(status_code=400, detail="Email já cadastrado")
+
+    colab = Pessoa(**payload.pessoa.dict())  # centro_de_custo, cliente, matricula já incluídos
+    db.add(colab)
+    db.commit()
+    db.refresh(colab)
+
+    try:
+        usuario = Usuario(
+            id_pessoa=colab.id,
+            email=payload.usuario.email,
+            senha=gerar_hash_senha(payload.usuario.senha)
+        )
+        db.add(usuario)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Erro ao salvar usuário")
+
+    return ColabResponse(
+        nome=colab.nome,
+        cpf=colab.cpf,
+        cliente=colab.cliente,
+        centro_de_custo=colab.centro_de_custo,
+        matricula=colab.matricula,
         email=usuario.email
     )
 
@@ -91,8 +122,6 @@ def get_me(request: Request, db: Session = Depends(get_db)):
     return PessoaResponse(
         nome=pessoa.nome,
         cpf=pessoa.cpf,
-        empresa=pessoa.empresa,
-        cliente=pessoa.cliente,
         email=usuario.email
     )
 

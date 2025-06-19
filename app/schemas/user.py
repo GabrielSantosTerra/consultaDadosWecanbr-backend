@@ -1,25 +1,41 @@
 from pydantic import BaseModel, EmailStr, Field
 
-class PessoaBase(BaseModel):
+# Simples: nome, cpf, empresa
+class PessoaBaseSimples(BaseModel):
     nome: str
     cpf: str = Field(..., min_length=11, max_length=14)
-    empresa: int
-    cliente: int
 
+class PessoaBaseColab(BaseModel):
+    nome: str
+    cpf: str = Field(..., min_length=11, max_length=14)
+    cliente: str
+    centro_de_custo: str
+    matricula: str
 class UsuarioBase(BaseModel):
     email: EmailStr
     senha: str
 
 class CadastroPessoa(BaseModel):
-    pessoa: PessoaBase
+    pessoa: PessoaBaseSimples
+    usuario: UsuarioBase
+
+class CadastroColaborador(BaseModel):
+    pessoa: PessoaBaseColab
     usuario: UsuarioBase
 
 class UsuarioLogin(BaseModel):
-    usuario: str  # email ou cpf
+    usuario: str
     senha: str
+
 class PessoaResponse(BaseModel):
     nome: str
     cpf: str
-    empresa: int
-    cliente: int
+    email: EmailStr
+
+class ColabResponse(BaseModel):
+    nome: str
+    cpf: str
+    centro_de_custo: str
+    matricula: str
+    cliente: str
     email: EmailStr
