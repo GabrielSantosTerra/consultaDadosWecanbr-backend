@@ -15,7 +15,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://docrh-615cf.web.app"],  # Domínio exato do Firebase Hosting
+    allow_origins=["http://localhost:5173", "https://docrh-615cf.web.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

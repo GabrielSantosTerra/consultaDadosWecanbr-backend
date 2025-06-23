@@ -1,16 +1,17 @@
-from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy import Column, Integer, String, ForeignKey, Boolean
 from app.database.connection import Base
 
 class Pessoa(Base):
     __tablename__ = "tb_pessoa"
     __table_args__ = {"schema": "app_rh"}
 
-    id = Column(Integer, primary_key=True, index=True)
-    nome = Column(String(100), nullable=False)
-    cpf = Column(String(14), unique=True, index=True, nullable=False)
-    cliente = Column(String(20), nullable=True)
-    centro_de_custo = Column(String(200), nullable=True)
-    matricula = Column(String(20), nullable=True)
+    id = Column(Integer, primary_key=True)
+    nome = Column(String, nullable=False)
+    cpf = Column(String, unique=True, nullable=False)
+    cliente = Column(String, nullable=False)
+    centro_de_custo = Column(String, nullable=False)
+    matricula = Column(String, nullable=False)
+    gestor = Column(Boolean, nullable=False, default=False)
 
 class Usuario(Base):
     __tablename__ = "tb_usuario"
