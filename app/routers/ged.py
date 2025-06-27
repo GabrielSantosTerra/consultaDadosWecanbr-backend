@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from fastapi.responses import JSONResponse
 import base64
 from config.settings import settings
+from typing import List
 from io import BytesIO
 from pdf2image import convert_from_bytes
 from PIL import Image
@@ -22,10 +23,13 @@ class DocumentoGED(BaseModel):
     datadevencimento: str = ""
     nossonumero: str = ""
 
-class BuscaDocumentoCampo(BaseModel):
-    id_template: int
-    campo: str
+class CampoConsulta(BaseModel):
+    nome: str
     valor: str
+
+class BuscaDocumentoCampos(BaseModel):
+    id_template: int
+    cp: List[CampoConsulta]
 
 class DownloadDocumentoPayload(BaseModel):
     id_tipo: int
@@ -143,14 +147,13 @@ def listar_todos_arquivos_por_template(id_tipo: int = Form(...)):
         )
 
 @router.post("/searchdocuments/documents")
-def buscar_documento_por_campo(payload: BuscaDocumentoCampo):
-    # Autenticação
+def buscar_documento_por_campos(payload: BuscaDocumentoCampos):
+    # Login GED
     auth_key = login(
         conta=settings.GED_CONTA,
         usuario=settings.GED_USUARIO,
         senha=settings.GED_SENHA
     )
-
     headers = {
         "Authorization": auth_key,
         "Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-1"
@@ -166,35 +169,28 @@ def buscar_documento_por_campo(payload: BuscaDocumentoCampo):
         raise HTTPException(status_code=500, detail="Falha ao buscar campos do template")
 
     campos_template = response_fields.json().get("fields", [])
+    nomes_campos = [campo["nomecampo"] for campo in campos_template]
+    # Inicializa cp[] com valores vazios na ordem dos campos do template
+    lista_cp = ["" for _ in nomes_campos]
 
-    # Montar lista cp[]
-    lista_cp = [""] * len(campos_template)
-    campo_encontrado = False
-    for idx, campo in enumerate(campos_template):
-        if campo.get("nomecampo") == payload.campo:
-            lista_cp[idx] = payload.valor
-            campo_encontrado = True
-            break
+    # Preenche cp[] nas posições corretas
+    for item in payload.cp:
+        if item.nome not in nomes_campos:
+            raise HTTPException(status_code=400, detail=f"Campo '{item.nome}' não encontrado no template")
+        idx = nomes_campos.index(item.nome)
+        lista_cp[idx] = item.valor
 
-    if not campo_encontrado:
-        raise HTTPException(status_code=400, detail=f"Campo '{payload.campo}' não encontrado")
-
-    # Aqui montamos o payload como lista de tuplas (forma correta!)
+    # Montar payload com múltiplos cp[]
     payload_busca = [("id_tipo", str(payload.id_template))]
-
-    for idx in range(len(campos_template)):
-        valor = payload.valor if campos_template[idx]["nomecampo"] == payload.campo else ""
-        payload_busca.append(("cp[]", valor))
-
-    # Campos obrigatórios fixos
+    payload_busca.extend([("cp[]", valor) for valor in lista_cp])
     payload_busca.extend([
         ("ordem", ""),
-        ("dt_criacao", ""),  # incluído obrigatoriamente
+        ("dt_criacao", ""),
         ("pagina", "1"),
         ("colecao", "S")
     ])
 
-    # Requisição para buscar documentos
+    # Requisição ao GED
     response_busca = requests.post(
         f"{BASE_URL}/documents/search",
         data=payload_busca,
@@ -204,14 +200,18 @@ def buscar_documento_por_campo(payload: BuscaDocumentoCampo):
     try:
         data = response_busca.json()
     except Exception:
-        raise HTTPException(status_code=500, detail=f"Erro na resposta da GED: {response_busca.text}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro na resposta da GED: {response_busca.text}"
+        )
 
-    if response_busca.status_code != 200 or data.get("error"):
+    if data.get("error"):
         raise HTTPException(
             status_code=500,
             detail=f"Erro {response_busca.status_code}: {data.get('message', 'Erro desconhecido')}\nRaw: {response_busca.text}"
         )
 
+    # Extrair atributos
     for doc in data.get("documents", []):
         attributes = doc.pop("attributes", [])
         for attr in attributes:
