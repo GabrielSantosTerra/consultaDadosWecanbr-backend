@@ -185,7 +185,7 @@ def upload_documento_base64(payload: UploadBase64Payload):
 
 @router.post("/documents/ultimos")
 def buscar_ultimos_documentos(payload: UltimosDocumentosRequest):
-    # Autentica no GED
+    # Login no GED
     auth_key = login(
         conta=settings.GED_CONTA,
         usuario=settings.GED_USUARIO,
@@ -196,7 +196,7 @@ def buscar_ultimos_documentos(payload: UltimosDocumentosRequest):
         "Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-1"
     }
 
-    # Busca os campos do template
+    # Buscar campos do template
     response_fields = requests.post(
         f"{BASE_URL}/templates/getfields",
         data={"id_template": payload.id_template},
@@ -209,27 +209,29 @@ def buscar_ultimos_documentos(payload: UltimosDocumentosRequest):
     nomes_campos = [campo["nomecampo"] for campo in campos_template]
     lista_cp_base = ["" for _ in nomes_campos]
 
-    # Aplica os valores informados (como matrícula)
+    # Aplicar os campos recebidos (ex: matrícula, tipodedoc)
     for item in payload.cp:
         if item.nome not in nomes_campos:
             raise HTTPException(status_code=400, detail=f"Campo '{item.nome}' não encontrado no template")
         idx = nomes_campos.index(item.nome)
         lista_cp_base[idx] = item.valor
 
-    # Verifica se o campo_anomes existe
+    # Validar campo_anomes
     if payload.campo_anomes not in nomes_campos:
         raise HTTPException(status_code=400, detail=f"Campo '{payload.campo_anomes}' não encontrado no template")
     idx_anomes = nomes_campos.index(payload.campo_anomes)
 
     documentos_total = []
 
-    # Calcula os últimos 3 anomes (ex: ["2025-07", "2025-06", "2025-05"])
+    # Gera os últimos 3 anomes (ex: 2025-07, 2025-06, 2025-05)
     hoje = datetime.today()
     ultimos_anomes = [(hoje - relativedelta(months=i)).strftime("%Y-%m") for i in range(3)]
 
     for anomes in ultimos_anomes:
         lista_cp = lista_cp_base.copy()
         lista_cp[idx_anomes] = anomes
+
+        print(f"🔍 Buscando documentos com anomes={anomes} → cp[] = {lista_cp}")
 
         payload_busca = [("id_tipo", str(payload.id_template))]
         payload_busca.extend([("cp[]", valor) for valor in lista_cp])
@@ -249,13 +251,12 @@ def buscar_ultimos_documentos(payload: UltimosDocumentosRequest):
         try:
             data = response_busca.json()
         except Exception:
-            raise HTTPException(status_code=500, detail=f"Erro na resposta da GED: {response_busca.text}")
+            print(f"⚠️ Erro ao interpretar resposta da GED para anomes={anomes}")
+            continue
 
         if data.get("error"):
-            raise HTTPException(
-                status_code=500,
-                detail=f"Erro {response_busca.status_code}: {data.get('message', 'Erro desconhecido')}\nRaw: {response_busca.text}"
-            )
+            print(f"⚠️ Nenhum documento encontrado para anomes={anomes} → {data.get('message')}")
+            continue  # não interrompe, tenta os próximos meses
 
         for doc in data.get("documents", []):
             attributes = doc.pop("attributes", [])
@@ -263,9 +264,13 @@ def buscar_ultimos_documentos(payload: UltimosDocumentosRequest):
                 doc[attr["name"]] = attr["value"]
             documentos_total.append(doc)
 
-    # Ordena pelos valores mais recentes no campo_anomes e retorna os 3 primeiros
+    # Ordena do mais novo pro mais antigo
     documentos_total.sort(key=lambda d: d.get(payload.campo_anomes, ""), reverse=True)
-    return JSONResponse(content={"documentos": documentos_total[:3]})
+
+    return JSONResponse(content={
+        "documentos": documentos_total[:3],  # no máximo 3
+        "tentativas": ultimos_anomes  # debug opcional
+    })
 
 @router.post("/searchdocuments/documents")
 def buscar_documento_por_campos(payload: BuscaDocumentoCampos):
