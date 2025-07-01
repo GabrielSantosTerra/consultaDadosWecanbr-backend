@@ -12,4 +12,5 @@ Pillow
 psycopg2
 python-multipart
 passlib>=1.7.4
+python-dateutil
 bcrypt<4.1
