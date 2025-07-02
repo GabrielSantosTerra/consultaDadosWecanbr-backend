@@ -272,9 +272,8 @@ def buscar_ultimos_documentos(payload: UltimosDocumentosRequest):
         "tentativas": ultimos_anomes  # debug opcional
     })
 
-@router.post("/searchdocuments/documents")
-def buscar_documento_por_campos(payload: BuscaDocumentoCampos):
-    # Login GED
+@router.post("/documents/ultimos")
+def buscar_ultimos_documentos(payload: UltimosDocumentosRequest):
     auth_key = login(
         conta=settings.GED_CONTA,
         usuario=settings.GED_USUARIO,
@@ -285,38 +284,39 @@ def buscar_documento_por_campos(payload: BuscaDocumentoCampos):
         "Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-1"
     }
 
-    # Buscar campos do template
+    # Buscar estrutura dos campos
     response_fields = requests.post(
         f"{BASE_URL}/templates/getfields",
         data={"id_template": payload.id_template},
         headers=headers
     )
     if response_fields.status_code != 200:
-        raise HTTPException(status_code=500, detail="Falha ao buscar campos do template")
+        raise HTTPException(status_code=500, detail="Erro ao buscar campos do template")
 
     campos_template = response_fields.json().get("fields", [])
     nomes_campos = [campo["nomecampo"] for campo in campos_template]
-    # Inicializa cp[] com valores vazios na ordem dos campos do template
     lista_cp = ["" for _ in nomes_campos]
 
-    # Preenche cp[] nas posições corretas
+    # Preencher cp[] com os campos informados (exceto anomes)
     for item in payload.cp:
         if item.nome not in nomes_campos:
             raise HTTPException(status_code=400, detail=f"Campo '{item.nome}' não encontrado no template")
         idx = nomes_campos.index(item.nome)
         lista_cp[idx] = item.valor
 
-    # Montar payload com múltiplos cp[]
+    if payload.campo_anomes not in nomes_campos:
+        raise HTTPException(status_code=400, detail=f"Campo '{payload.campo_anomes}' não encontrado no template")
+
+    # Buscar documentos sem filtrar por anomes
     payload_busca = [("id_tipo", str(payload.id_template))]
     payload_busca.extend([("cp[]", valor) for valor in lista_cp])
     payload_busca.extend([
-        ("ordem", ""),
+        ("ordem", ""),  # você pode usar "idocs_dt_criacao" se quiser usar data de criação
         ("dt_criacao", ""),
         ("pagina", "1"),
         ("colecao", "S")
     ])
 
-    # Requisição ao GED
     response_busca = requests.post(
         f"{BASE_URL}/documents/search",
         data=payload_busca,
@@ -326,24 +326,26 @@ def buscar_documento_por_campos(payload: BuscaDocumentoCampos):
     try:
         data = response_busca.json()
     except Exception:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Erro na resposta da GED: {response_busca.text}"
-        )
+        raise HTTPException(status_code=500, detail=f"Erro ao interpretar resposta da GED")
 
     if data.get("error"):
-        raise HTTPException(
-            status_code=500,
-            detail=f"Erro {response_busca.status_code}: {data.get('message', 'Erro desconhecido')}\nRaw: {response_busca.text}"
-        )
+        raise HTTPException(status_code=500, detail=f"Erro: {data.get('message')}")
 
-    # Extrair atributos
+    documentos_total = []
+
     for doc in data.get("documents", []):
         attributes = doc.pop("attributes", [])
         for attr in attributes:
             doc[attr["name"]] = attr["value"]
+        documentos_total.append(doc)
 
-    return JSONResponse(content=data)
+    # Ordenar por anomes DESC e retornar os 3 mais recentes
+    documentos_total.sort(key=lambda d: d.get(payload.campo_anomes, ""), reverse=True)
+
+    return JSONResponse(content={
+        "documentos": documentos_total[:3],
+        "total_encontrado": len(documentos_total)
+    })
 
 @router.post("/searchdocuments/download") #Fazer com que ao baixar o documento ele de um log de quem baixou
 def baixar_documento(payload: DownloadDocumentoPayload):
