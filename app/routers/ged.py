@@ -242,25 +242,28 @@ def buscar_ultimos_documentos(payload: UltimosDocumentosRequest):
         raise HTTPException(status_code=500, detail=f"Erro: {data.get('message')}")
 
     documentos_total = []
-
     for doc in data.get("documents", []):
         attributes = doc.pop("attributes", [])
         for attr in attributes:
             doc[attr["name"]] = attr["value"]
         documentos_total.append(doc)
 
-    # ✅ Filtro: apenas com campo_anomes presente e não vazio
-    documentos_validos = [
+    # ✅ Calcular últimos 6 meses
+    base = datetime.today().replace(day=1)
+    ultimos_6_anomes = [(base - relativedelta(months=i)).strftime("%Y-%m") for i in range(6)]
+
+    # ✅ Filtrar documentos com anomes dentro dos últimos 6 meses
+    documentos_filtrados = [
         d for d in documentos_total
-        if payload.campo_anomes in d and d[payload.campo_anomes]
+        if payload.campo_anomes in d and d[payload.campo_anomes] in ultimos_6_anomes
     ]
 
-    # ✅ Ordenar pelo campo anomes
-    documentos_validos.sort(key=lambda d: d[payload.campo_anomes], reverse=True)
+    # Ordenar por anomes decrescente
+    documentos_filtrados.sort(key=lambda d: d[payload.campo_anomes], reverse=True)
 
     return JSONResponse(content={
-        "documentos": documentos_validos[:3],
-        "total_encontrado": len(documentos_total)
+        "documentos": documentos_filtrados,
+        "total_encontrado": len(documentos_filtrados)
     })
 
 @router.post("/searchdocuments/download") #Fazer com que ao baixar o documento ele de um log de quem baixou
