@@ -208,7 +208,6 @@ def buscar_ultimos_documentos(payload: UltimosDocumentosRequest):
     nomes_campos = [campo["nomecampo"] for campo in campos_template]
     lista_cp = ["" for _ in nomes_campos]
 
-    # Preencher cp[] com os campos informados (exceto anomes)
     for item in payload.cp:
         if item.nome not in nomes_campos:
             raise HTTPException(status_code=400, detail=f"Campo '{item.nome}' não encontrado no template")
@@ -218,11 +217,11 @@ def buscar_ultimos_documentos(payload: UltimosDocumentosRequest):
     if payload.campo_anomes not in nomes_campos:
         raise HTTPException(status_code=400, detail=f"Campo '{payload.campo_anomes}' não encontrado no template")
 
-    # Buscar documentos sem filtrar por anomes
+    # Busca geral sem filtro por anomes
     payload_busca = [("id_tipo", str(payload.id_template))]
     payload_busca.extend([("cp[]", valor) for valor in lista_cp])
     payload_busca.extend([
-        ("ordem", ""),  # você pode usar "idocs_dt_criacao" se quiser usar data de criação
+        ("ordem", ""),
         ("dt_criacao", ""),
         ("pagina", "1"),
         ("colecao", "S")
@@ -237,7 +236,7 @@ def buscar_ultimos_documentos(payload: UltimosDocumentosRequest):
     try:
         data = response_busca.json()
     except Exception:
-        raise HTTPException(status_code=500, detail=f"Erro ao interpretar resposta da GED")
+        raise HTTPException(status_code=500, detail="Erro ao interpretar resposta da GED")
 
     if data.get("error"):
         raise HTTPException(status_code=500, detail=f"Erro: {data.get('message')}")
@@ -250,11 +249,17 @@ def buscar_ultimos_documentos(payload: UltimosDocumentosRequest):
             doc[attr["name"]] = attr["value"]
         documentos_total.append(doc)
 
-    # Ordenar por anomes DESC e retornar os 3 mais recentes
-    documentos_total.sort(key=lambda d: d.get(payload.campo_anomes, ""), reverse=True)
+    # ✅ Filtro: apenas com campo_anomes presente e não vazio
+    documentos_validos = [
+        d for d in documentos_total
+        if payload.campo_anomes in d and d[payload.campo_anomes]
+    ]
+
+    # ✅ Ordenar pelo campo anomes
+    documentos_validos.sort(key=lambda d: d[payload.campo_anomes], reverse=True)
 
     return JSONResponse(content={
-        "documentos": documentos_total[:3],
+        "documentos": documentos_validos[:3],
         "total_encontrado": len(documentos_total)
     })
 
