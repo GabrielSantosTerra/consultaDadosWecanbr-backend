@@ -345,7 +345,7 @@ def buscar_documento_por_campos(payload: BuscaDocumentoCampos):
 
     return JSONResponse(content=data)
 
-@router.post("/searchdocuments/download")
+@router.post("/searchdocuments/download") #Fazer com que ao baixar o documento ele de um log de quem baixou
 def baixar_documento(payload: DownloadDocumentoPayload):
     auth_key = login(
         conta=settings.GED_CONTA,
