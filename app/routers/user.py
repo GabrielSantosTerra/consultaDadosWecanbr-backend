@@ -1,15 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
-from datetime import timedelta
+from app.utils.jwt_handler import decode_token
+from datetime import datetime
 import re
 import os
 
-from app.utils.password import gerar_hash_senha, verificar_senha  # <-- adiciona
+from app.utils.password import gerar_hash_senha, verificar_senha
 from app.database.connection import get_db
 from app.models.user import Usuario, Pessoa
+from app.models.blacklist import TokenBlacklist
 from app.schemas.user import CadastroPessoa, UsuarioLogin, PessoaResponse, CadastroColaborador, ColabResponse
-from app.utils.jwt_handler import criar_token, verificar_token
+from app.utils.jwt_handler import criar_token, verificar_token, decode_token
 from dotenv import load_dotenv
 
 router = APIRouter()
@@ -110,6 +112,8 @@ def login(payload: UsuarioLogin, db: Session = Depends(get_db)):
 
     return response
 
+from app.models.blacklist import TokenBlacklist  # já está no seu projeto
+
 @router.get("/user/me", response_model=PessoaResponse)
 def get_me(request: Request, db: Session = Depends(get_db)):
     access_token = request.cookies.get("access_token")
@@ -119,6 +123,14 @@ def get_me(request: Request, db: Session = Depends(get_db)):
     payload = verificar_token(access_token)
     if not payload:
         raise HTTPException(status_code=401, detail="Token inválido")
+
+    jti = payload.get("jti")
+    if not jti:
+        raise HTTPException(status_code=401, detail="Token sem identificador único (jti)")
+
+    # ❌ Verifica se esse jti está na blacklist
+    if db.query(TokenBlacklist).filter_by(jti=jti).first():
+        raise HTTPException(status_code=401, detail="Token expirado ou inválido")
 
     pessoa = db.query(Pessoa).filter(Pessoa.id == payload.get("id")).first()
     usuario = db.query(Usuario).filter(Usuario.id_pessoa == pessoa.id).first()
@@ -135,6 +147,7 @@ def get_me(request: Request, db: Session = Depends(get_db)):
         matricula=pessoa.matricula,
         gestor=pessoa.gestor
     )
+
 
 @router.post("/user/refresh")
 def refresh_token(request: Request, db: Session = Depends(get_db)):
@@ -164,7 +177,22 @@ def refresh_token(request: Request, db: Session = Depends(get_db)):
     return response
 
 @router.post("/user/logout")
-def logout(response: Response):
+def logout(request: Request, response: Response, db: Session = Depends(get_db)):
+    token = request.cookies.get("access_token")
+    if token:
+        print(token)
+        try:
+            payload = decode_token(token)
+            jti = payload.get("jti")
+            exp = datetime.fromtimestamp(payload.get("exp"))
+            print(f"[LOGOUT] jti: {jti} - exp: {exp}")  # ← LOG
+            db.add(TokenBlacklist(jti=jti, expira_em=exp))
+            db.commit()
+        except Exception as e:
+            print(f"[ERRO LOGOUT] {e}")  # ← LOG de erro
+    else:
+        print("[LOGOUT] Token não enviado")
+
     response.delete_cookie("access_token", path="/")
     response.delete_cookie("refresh_token", path="/")
     response.delete_cookie("logged_user", path="/")
