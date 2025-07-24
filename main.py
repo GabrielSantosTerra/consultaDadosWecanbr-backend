@@ -22,9 +22,9 @@ app.add_middleware(
 )
 
 # rotas
-app.include_router(documents_router.router)
-app.include_router(usuario_router.router)
-app.include_router(ged_router.router)
+app.include_router(documents_router.router, tags=["Documentos"])
+app.include_router(usuario_router.router, tags=["Usuários"])
+app.include_router(ged_router.router, tags=["GED"])
 
 @app.get("/")
 def root():
