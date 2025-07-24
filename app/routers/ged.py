@@ -667,7 +667,7 @@ def gerar_recibo(cabecalho: dict, eventos: list[dict], rodape: dict, page_number
     pdf.cell(80, 6, funcionario, ln=0)
     pdf.cell(0, 6, "Data: ____/____/____", ln=1, align='R')
 
-    return bytes(pdf.output(dest='S'))
+    return pdf.output(dest='S').encode('latin-1')
 
 @router.post("/documents/holerite/montar")
 def montar_holerite(
