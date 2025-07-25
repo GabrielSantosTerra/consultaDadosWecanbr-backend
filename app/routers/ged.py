@@ -539,8 +539,7 @@ def gerar_recibo(cabecalho: dict, eventos: list[dict], rodape: dict, page_number
     # — Cabeçalho Superior —
     pdf.set_font("Arial", 'B', 12)
     pdf.cell(0, 6, "Recibo de Pagamento de Salário", ln=0)
-    pdf.cell(0, 6, f"Pág: {page_number:02d}", ln=1, align='R')
-    pdf.ln(2)
+    pdf.ln(6)
 
     # — Empresa e Cliente —
     pdf.set_font("Arial", '', 9)
