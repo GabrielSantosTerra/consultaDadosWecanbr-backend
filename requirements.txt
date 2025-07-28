@@ -4,13 +4,13 @@ pydantic[email]
 pydantic-settings
 python-dotenv
 sqlalchemy
-passlib[bcrypt]
+passlib[bcrypt]>=1.7.4
 python-jose
 requests
 pdf2image
 Pillow
 psycopg2
 python-multipart
-passlib>=1.7.4
 python-dateutil
 bcrypt<4.1
+Babel>=2.12.1
