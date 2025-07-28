@@ -14,3 +14,4 @@ python-multipart
 python-dateutil
 bcrypt<4.1
 Babel>=2.12.1
+fpdf>=1.7.2
