@@ -185,8 +185,12 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
             db.add(TokenBlacklist(jti=jti, expira_em=exp))
             db.commit()
         except Exception as e:
-            response.delete_cookie("access_token", path="/")
-            response.delete_cookie("refresh_token", path="/")
-            response.delete_cookie("logged_user", path="/")
+            print(f"[ERRO LOGOUT] {e}")  # ← LOG de erro
+    else:
+        print("[LOGOUT] Token não enviado")
+
+    response.delete_cookie("access_token", path="/")
+    response.delete_cookie("refresh_token", path="/")
+    response.delete_cookie("logged_user", path="/")
 
     return {"message": "Logout realizado com sucesso"}
