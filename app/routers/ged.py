@@ -703,6 +703,9 @@ def montar_holerite(
     evt_res = db.execute(sql_eventos, params)
     eventos = [dict(zip(evt_res.keys(), row)) for row in evt_res.fetchall()]
 
+    if not eventos:
+      raise HTTPException(status_code=404, detail="Eventos não encontrados")
+
     # Validação de tipo de eventos (V ou D)
     for evt in eventos:
         tipo = evt.get('tipo', '').upper()
