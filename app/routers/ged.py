@@ -1,5 +1,5 @@
 from urllib import response
-from fastapi import APIRouter, HTTPException, Form, Depends, Response
+from fastapi import APIRouter, HTTPException, Form, Depends, Response, r
 from typing import Any
 import requests
 from pydantic import BaseModel
@@ -692,7 +692,7 @@ def montar_holerite(
         raise HTTPException(status_code=404, detail="Cabeçalho não encontrado")
     cabecalho = dict(zip(cab_res.keys(), cab_row))
 
-# Eventos
+    # Eventos
     sql_eventos = text("""
         SELECT evento, evento_nome, referencia, valor, tipo
         FROM tb_holerite_eventos
@@ -701,10 +701,10 @@ def montar_holerite(
         ORDER BY evento
     """)
     evt_res = db.execute(sql_eventos, params)
-    evt_row = evt_res.first() # faltou aqui
-    if not evt_row:           # e aqui
-        raise HTTPException(status_code=404, detail="Eventos não encontrados") # e aqui
     eventos = [dict(zip(evt_res.keys(), row)) for row in evt_res.fetchall()]
+
+    if not eventos:
+      return Response(status_code=204)
 
     # Validação de tipo de eventos (V ou D)
     for evt in eventos:
@@ -744,18 +744,6 @@ def montar_holerite(
 
 
 # ********************************************
-
-
-
-
-
-
-
-
-
-
-
-
 
 @router.post("/searchdocuments/download") #Fazer com que ao baixar o documento ele de um log de quem baixou
 def baixar_documento(payload: DownloadDocumentoPayload):
