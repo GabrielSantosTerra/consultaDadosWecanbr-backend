@@ -675,7 +675,7 @@ def montar_holerite(
 ):
     params = {"matricula": payload.matricula, "competencia": payload.competencia, "lote": payload.lote}
 
-   # Cabeçalho
+    # Cabeçalho
     sql_cabecalho = text("""
         SELECT empresa, filial, empresa_nome, empresa_cnpj,
                cliente, cliente_nome, cliente_cnpj,
@@ -692,7 +692,7 @@ def montar_holerite(
         raise HTTPException(status_code=404, detail="Cabeçalho não encontrado")
     cabecalho = dict(zip(cab_res.keys(), cab_row))
 
-    # Eventos
+# Eventos
     sql_eventos = text("""
         SELECT evento, evento_nome, referencia, valor, tipo
         FROM tb_holerite_eventos
@@ -739,7 +739,8 @@ def montar_holerite(
         "eventos": eventos,
         "rodape": rodape,
         "pdf_base64": pdf_base64
-}
+    }
+
 
 
 # ********************************************
