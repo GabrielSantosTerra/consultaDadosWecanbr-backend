@@ -1,5 +1,5 @@
 from urllib import response
-from fastapi import APIRouter, HTTPException, Form, Depends
+from fastapi import APIRouter, HTTPException, Form, Depends, Response
 from typing import Any
 import requests
 from pydantic import BaseModel
@@ -704,7 +704,7 @@ def montar_holerite(
     eventos = [dict(zip(evt_res.keys(), row)) for row in evt_res.fetchall()]
 
     if not eventos:
-      raise HTTPException(status_code=404, detail="Eventos não encontrados")
+      raise Response(satus_code=204)
 
     # Validação de tipo de eventos (V ou D)
     for evt in eventos:
