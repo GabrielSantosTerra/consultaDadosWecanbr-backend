@@ -29,8 +29,6 @@ cookie_env = {
 
 @router.post("/user/register")
 def registrar_usuario(payload: CadastroPessoa, db: Session = Depends(get_db)):
-    print("Requisição recebida:", payload)
-
     if db.query(Pessoa).filter(Pessoa.cpf == payload.pessoa.cpf).first():
         raise HTTPException(status_code=400, detail="CPF já cadastrado")
 
@@ -180,21 +178,15 @@ def refresh_token(request: Request, db: Session = Depends(get_db)):
 def logout(request: Request, response: Response, db: Session = Depends(get_db)):
     token = request.cookies.get("access_token")
     if token:
-        print(token)
         try:
             payload = decode_token(token)
             jti = payload.get("jti")
             exp = datetime.fromtimestamp(payload.get("exp"))
-            print(f"[LOGOUT] jti: {jti} - exp: {exp}")  # ← LOG
             db.add(TokenBlacklist(jti=jti, expira_em=exp))
             db.commit()
         except Exception as e:
-            print(f"[ERRO LOGOUT] {e}")  # ← LOG de erro
-    else:
-        print("[LOGOUT] Token não enviado")
-
-    response.delete_cookie("access_token", path="/")
-    response.delete_cookie("refresh_token", path="/")
-    response.delete_cookie("logged_user", path="/")
+            response.delete_cookie("access_token", path="/")
+            response.delete_cookie("refresh_token", path="/")
+            response.delete_cookie("logged_user", path="/")
 
     return {"message": "Logout realizado com sucesso"}
