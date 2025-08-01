@@ -1,5 +1,5 @@
 from urllib import response
-from fastapi import APIRouter, HTTPException, Form, Depends, Response, r
+from fastapi import APIRouter, HTTPException, Form, Depends, Response
 from typing import Any
 import requests
 from pydantic import BaseModel
