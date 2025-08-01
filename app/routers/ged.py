@@ -704,7 +704,7 @@ def montar_holerite(
     eventos = [dict(zip(evt_res.keys(), row)) for row in evt_res.fetchall()]
 
     if not eventos:
-      raise Response(satus_code=204)
+      raise Response(status_code=204)
 
     # Validação de tipo de eventos (V ou D)
     for evt in eventos:
