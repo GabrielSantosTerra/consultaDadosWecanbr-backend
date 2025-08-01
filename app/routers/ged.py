@@ -675,7 +675,7 @@ def montar_holerite(
 ):
     params = {"matricula": payload.matricula, "competencia": payload.competencia, "lote": payload.lote}
 
-    # Cabeçalho
+   # Cabeçalho
     sql_cabecalho = text("""
         SELECT empresa, filial, empresa_nome, empresa_cnpj,
                cliente, cliente_nome, cliente_cnpj,
@@ -701,10 +701,10 @@ def montar_holerite(
         ORDER BY evento
     """)
     evt_res = db.execute(sql_eventos, params)
+    evt_row = evt_res.first() # faltou aqui
+    if not evt_row:           # e aqui
+        raise HTTPException(status_code=404, detail="Eventos não encontrados") # e aqui
     eventos = [dict(zip(evt_res.keys(), row)) for row in evt_res.fetchall()]
-
-    if not eventos:
-      return Response(status_code=204)
 
     # Validação de tipo de eventos (V ou D)
     for evt in eventos:
@@ -739,8 +739,7 @@ def montar_holerite(
         "eventos": eventos,
         "rodape": rodape,
         "pdf_base64": pdf_base64
-    }
-
+}
 
 
 # ********************************************
