@@ -1,18 +1,19 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.database.connection import engine
-from app.models import user  # importa o módulo completo, não uma classe
-from app.routers import user as usuario_router  # este é seu routers/user.py
-from app.routers import ged as ged_router       # este é seu routers/ged.py
+
+from app.database.connection import engine, Base
+
+from app.models.user import Pessoa, Usuario
+_ = (Pessoa, Usuario)
+
+Base.metadata.create_all(bind=engine)
+
 from app.routers import document as documents_router
-from app.routers import gustavo as gustavo_routers ####NÃO COMITAR
+from app.routers import user  as usuario_router
+from app.routers import ged   as ged_router
+from app.routers import gustavo as gustavo_router
 
-# cria as tabelas a partir das classes dentro de user.py
-user.Base.metadata.create_all(bind=engine)
-
-app = FastAPI()
-
-# ✅ Configuração CORS para frontend local e produção Firebase Hosting
+app = FastAPI(title="Consulta de Documentos – WeCanBR")
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,7 +27,7 @@ app.add_middleware(
 app.include_router(documents_router.router, tags=["Documentos"])
 app.include_router(usuario_router.router, tags=["Usuários"])
 app.include_router(ged_router.router, tags=["GED"])
-app.include_router(gustavo_routers.router, tags=["Gustavo"])
+app.include_router(gustavo_router.router, tags=["Gustavo"])
 
 @app.get("/")
 def root():

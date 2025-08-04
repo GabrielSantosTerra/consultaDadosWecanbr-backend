@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from app.utils.jwt_handler import decode_token
@@ -27,15 +27,18 @@ cookie_env = {
 
 # if ENVIROMENT == "dev"
 
-@router.post("/user/register")
-def registrar_usuario(payload: CadastroPessoa, db: Session = Depends(get_db)):
+@router.post("/user/register", response_model=None, status_code=status.HTTP_201_CREATED)
+def registrar_usuario(
+    payload: CadastroPessoa,
+    db: Session = Depends(get_db),
+):
     if db.query(Pessoa).filter(Pessoa.cpf == payload.pessoa.cpf).first():
         raise HTTPException(status_code=400, detail="CPF já cadastrado")
 
     if db.query(Usuario).filter(Usuario.email == payload.usuario.email).first():
         raise HTTPException(status_code=400, detail="Email já cadastrado")
 
-    pessoa = Pessoa(**payload.pessoa.dict())  # ✅ agora contém gestor
+    pessoa = Pessoa(**payload.pessoa.dict())
     db.add(pessoa)
     db.commit()
     db.refresh(pessoa)
@@ -47,43 +50,45 @@ def registrar_usuario(payload: CadastroPessoa, db: Session = Depends(get_db)):
     )
     db.add(usuario)
     db.commit()
-    db.refresh(usuario)
 
     return pessoa
 
-@router.post("/user/register_colab", response_model=ColabResponse)
-def registrar_colaborador(payload: CadastroColaborador, db: Session = Depends(get_db)):
-    if db.query(Usuario).filter(Usuario.email == payload.usuario.email).first():
-        raise HTTPException(status_code=400, detail="Email já cadastrado")
+# @router.post("/user/register_colab", response_model=ColabResponse)
+# def registrar_colaborador(payload: CadastroColaborador, db: Session = Depends(get_db)):
+#     if db.query(Usuario).filter(Usuario.email == payload.usuario.email).first():
+#         raise HTTPException(status_code=400, detail="Email já cadastrado")
 
-    colab = Pessoa(**payload.pessoa.dict())  # centro_de_custo, cliente, matricula já incluídos
-    db.add(colab)
-    db.commit()
-    db.refresh(colab)
+#     colab = Pessoa(**payload.pessoa.dict())  # centro_de_custo, cliente, matricula já incluídos
+#     db.add(colab)
+#     db.commit()
+#     db.refresh(colab)
 
-    try:
-        usuario = Usuario(
-            id_pessoa=colab.id,
-            email=payload.usuario.email,
-            senha=gerar_hash_senha(payload.usuario.senha)
-        )
-        db.add(usuario)
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Erro ao salvar usuário")
+#     try:
+#         usuario = Usuario(
+#             id_pessoa=colab.id,
+#             email=payload.usuario.email,
+#             senha=gerar_hash_senha(payload.usuario.senha)
+#         )
+#         db.add(usuario)
+#         db.commit()
+#     except Exception:
+#         db.rollback()
+#         raise HTTPException(status_code=500, detail="Erro ao salvar usuário")
 
-    return ColabResponse(
-        nome=colab.nome,
-        cpf=colab.cpf,
-        cliente=colab.cliente,
-        centro_de_custo=colab.centro_de_custo,
-        matricula=colab.matricula,
-        email=usuario.email
-    )
+#     return ColabResponse(
+#         nome=colab.nome,
+#         cpf=colab.cpf,
+#         cliente=colab.cliente,
+#         centro_de_custo=colab.centro_de_custo,
+#         matricula=colab.matricula,
+#         email=usuario.email
+#     )
 
-@router.post("/user/login")
-def login(payload: UsuarioLogin, db: Session = Depends(get_db)):
+@router.post("/user/login", response_model=None, status_code=status.HTTP_200_OK)
+def login(
+    payload: UsuarioLogin,
+    db: Session = Depends(get_db),
+):
     def is_email(valor: str) -> bool:
         return re.match(r"[^@]+@[^@]+\.[^@]+", valor) is not None
 
@@ -98,19 +103,38 @@ def login(payload: UsuarioLogin, db: Session = Depends(get_db)):
     if not usuario or not verificar_senha(payload.senha, usuario.senha):
         raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
 
-    pessoa = db.query(Pessoa).filter(Pessoa.id == usuario.id_pessoa).first()
-
-    access_token = criar_token({"id": pessoa.id}, expires_in=60 * 24 * 7)
-    refresh_token = criar_token({"id": pessoa.id}, expires_in=60 * 24 * 30)
-
+    access_token = criar_token(
+        {"id": usuario.id_pessoa},
+        expires_in=60 * 24 * 7
+    )
+    refresh_token = criar_token(
+        {"id": usuario.id_pessoa},
+        expires_in=60 * 24 * 30
+    )
     response = JSONResponse(content={"message": "Login com sucesso"})
-    response.set_cookie("access_token", access_token, httponly=True, path="/", max_age=60 * 60 * 24 * 7, **cookie_env) # se prod: secure=True, samesite="None" se dev: secure=False, samesite="Lax"
-    response.set_cookie("refresh_token", refresh_token, httponly=True, path="/", max_age=60 * 60 * 24 * 30, **cookie_env) # se prod: secure=True, samesite="None" se dev: secure=False, samesite="Lax"
-    response.set_cookie("logged_user", "true", httponly=False, path="/", max_age=60 * 60 * 24 * 7, **cookie_env) # se prod: secure=True, samesite="None" se dev: secure=False, samesite="Lax"
+    response.set_cookie(
+        "access_token",
+        access_token,
+        httponly=True,
+        path="/",
+        max_age=60 * 60 * 24 * 7,
+    )
+    response.set_cookie(
+        "refresh_token",
+        refresh_token,
+        httponly=True,
+        path="/",
+        max_age=60 * 60 * 24 * 30,
+    )
+    response.set_cookie(
+        "logged_user",
+        "true",
+        httponly=False,
+        path="/",
+        max_age=60 * 60 * 24 * 7,
+    )
 
     return response
-
-from app.models.blacklist import TokenBlacklist  # já está no seu projeto
 
 @router.get("/user/me", response_model=PessoaResponse)
 def get_me(request: Request, db: Session = Depends(get_db)):
