@@ -47,7 +47,7 @@ class CampoValor(BaseModel):
     nome: str
     valor: str
 
-class UltimosDocumentosRequest(BaseModel):
+class SearchDocumentosRequest(BaseModel):
     id_template: int
     cp: List[CampoValor]  # incluirá matrícula como no modelo atual
     campo_anomes: str
@@ -198,8 +198,8 @@ def upload_documento_base64(payload: UploadBase64Payload):
     except Exception:
         raise HTTPException(status_code=500, detail=f"Erro no upload: {response.text}")
 
-@router.post("/documents/ultimos")
-def buscar_ultimos_documentos(payload: UltimosDocumentosRequest):
+@router.post("/documents/search")
+def buscar_search_documentos(payload: SearchDocumentosRequest):
     auth_key = login(
         conta=settings.GED_CONTA,
         usuario=settings.GED_USUARIO,
