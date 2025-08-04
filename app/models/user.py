@@ -22,7 +22,7 @@ class Usuario(Base):
     __table_args__ = {'schema': 'app_rh'}
 
     id = Column(Integer, primary_key=True, index=True)
-    id_pessoa = Column(Integer, ForeignKey('tb_pessoa.id'), nullable=False)
+    id_pessoa = Column(Integer, ForeignKey('app_rh.tb_pessoa.id'), nullable=False)
     email = Column(String(100), unique=True, nullable=False)
     senha = Column(String, nullable=False)
 

@@ -100,7 +100,8 @@ def login(
             raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
         usuario = db.query(Usuario).filter(Usuario.id_pessoa == pessoa.id).first()
 
-    if not usuario or not verificar_senha(payload.senha, usuario.senha):
+    # CHANGED: verificação direta de igualdade, sem chamar verificar_senha()
+    if not usuario or payload.senha != usuario.senha:
         raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
 
     access_token = criar_token(
