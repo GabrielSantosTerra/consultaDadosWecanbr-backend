@@ -2,7 +2,7 @@ from urllib import response
 from fastapi import APIRouter, HTTPException, Form, Depends, Response
 from typing import Any
 import requests
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi.responses import JSONResponse
 from datetime import datetime
 from babel.dates import format_date
@@ -14,6 +14,7 @@ from config.settings import settings
 from typing import List
 from io import BytesIO
 import io
+import re
 import base64
 from fpdf import FPDF
 # from PIL import Image
@@ -60,6 +61,11 @@ class MontarHolerite(BaseModel):
     matricula: str
     competencia: str
     lote: str
+    cpf: str = Field(
+        ...,
+        pattern=r'^\d{11}$',
+        description="CPF sem formatação, 11 dígitos (ex: 06485294015)"
+    )
 
 class UploadBase64Payload(BaseModel):
     id_tipo: int
@@ -200,6 +206,7 @@ def upload_documento_base64(payload: UploadBase64Payload):
 
 @router.post("/documents/search")
 def buscar_search_documentos(payload: SearchDocumentosRequest):
+    # 1) Autentica no GED
     auth_key = login(
         conta=settings.GED_CONTA,
         usuario=settings.GED_USUARIO,
@@ -210,80 +217,96 @@ def buscar_search_documentos(payload: SearchDocumentosRequest):
         "Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-1"
     }
 
-    # Buscar estrutura dos campos
-    response_fields = requests.post(
+    # 2) Obtém definição de campos do template
+    resp_fields = requests.post(
         f"{BASE_URL}/templates/getfields",
         data={"id_template": payload.id_template},
         headers=headers
     )
-    if response_fields.status_code != 200:
-        raise HTTPException(status_code=500, detail="Erro ao buscar campos do template")
+    resp_fields.raise_for_status()
+    nomes_campos = [f["nomecampo"] for f in resp_fields.json().get("fields", [])]
 
-    campos_template = response_fields.json().get("fields", [])
-    nomes_campos = [campo["nomecampo"] for campo in campos_template]
+    # 3) Monta a lista cp[] na ordem exata
     lista_cp = ["" for _ in nomes_campos]
-
     for item in payload.cp:
         if item.nome not in nomes_campos:
-            raise HTTPException(status_code=400, detail=f"Campo '{item.nome}' não encontrado no template")
-        idx = nomes_campos.index(item.nome)
-        lista_cp[idx] = item.valor
+            raise HTTPException(400, f"Campo '{item.nome}' não existe no template")
+        lista_cp[nomes_campos.index(item.nome)] = item.valor
 
     if payload.campo_anomes not in nomes_campos:
-        raise HTTPException(status_code=400, detail=f"Campo '{payload.campo_anomes}' não encontrado no template")
+        raise HTTPException(400, f"Campo '{payload.campo_anomes}' não existe no template")
 
-    # Busca geral sem filtro por anomes
+    # 4) Monta payload de busca (id_tipo, cp[], ordem, dt_criacao, pagina, colecao)
     payload_busca = [("id_tipo", str(payload.id_template))]
-    payload_busca.extend([("cp[]", valor) for valor in lista_cp])
-    payload_busca.extend([
-        ("ordem", ""),
+    payload_busca += [("cp[]", v) for v in lista_cp]
+    payload_busca += [
+        ("ordem", "no_ordem"),
         ("dt_criacao", ""),
         ("pagina", "1"),
-        ("colecao", "S")
-    ])
+        ("colecao", "S"),
+    ]
 
-    response_busca = requests.post(
+    # 5) Executa busca
+    resp_busca = requests.post(
         f"{BASE_URL}/documents/search",
         data=payload_busca,
         headers=headers
     )
-
-    try:
-        data = response_busca.json()
-    except Exception:
-        raise HTTPException(status_code=500, detail="Erro ao interpretar resposta da GED")
-
+    resp_busca.raise_for_status()
+    data = resp_busca.json()
     if data.get("error"):
-        raise HTTPException(status_code=500, detail=f"Erro: {data.get('message')}")
+        raise HTTPException(500, f"GED erro: {data.get('message')}")
 
+    # 6) Desenvelopa atributos
     documentos_total = []
     for doc in data.get("documents", []):
-        attributes = doc.pop("attributes", [])
-        for attr in attributes:
+        for attr in doc.pop("attributes", []):
             doc[attr["name"]] = attr["value"]
         documentos_total.append(doc)
 
-    # ✅ Calcular últimos 6 meses
-    base = datetime.today().replace(day=1)
-    ultimos_6_anomes = [(base - relativedelta(months=i)).strftime("%Y-%m") for i in range(6)]
+    # 7) Normaliza "anomes" para YYYY-MM e converte em datetime
+    datas_doc = []
+    for d in documentos_total:
+        raw = d.get(payload.campo_anomes, "")
+        # se vier 'YYYY-MM' mantém, se vier 'YYYYMM' converte
+        if len(raw) == 6 and raw.isdigit():
+            norm = f"{raw[:4]}-{raw[4:]}"
+        else:
+            norm = raw
+        try:
+            dt = datetime.strptime(norm, "%Y-%m")
+            d["_norm_anomes"] = norm
+            datas_doc.append(dt)
+        except ValueError:
+            # ignora formatos inválidos
+            continue
 
-    # ✅ Filtrar documentos com anomes dentro dos últimos 6 meses
-    documentos_filtrados = [
+    # 8) Define base como a data mais recente encontrada (ou hoje se nenhuma)
+    if datas_doc:
+        base = max(datas_doc)
+    else:
+        base = datetime.today().replace(day=1)
+
+    # 9) Monta janela dos últimos 6 meses a partir da base dinâmica
+    ultimos_6 = {
+        (base - relativedelta(months=i)).strftime("%Y-%m")
+        for i in range(6)
+    }
+
+    # 10) Filtra documentos dessa janela
+    docs_filtrados = [
         d for d in documentos_total
-        if payload.campo_anomes in d and d[payload.campo_anomes] in ultimos_6_anomes
+        if d.get("_norm_anomes") in ultimos_6
     ]
+    docs_filtrados.sort(key=lambda d: d["_norm_anomes"], reverse=True)
 
-    # Ordenar por anomes decrescente
-    documentos_filtrados.sort(key=lambda d: d[payload.campo_anomes], reverse=True)
-
-    return JSONResponse(content={
-        "documentos": documentos_filtrados,
-        "total_encontrado": len(documentos_filtrados)
-    })
-
-
-
-
+    # 11) Retorna resultado (FastAPI converte o dict em JSON)
+    return {
+        "total_bruto": len(documentos_total),
+        "ultimos_6_meses": sorted(ultimos_6, reverse=True),
+        "total_encontrado": len(docs_filtrados),
+        "documentos": docs_filtrados
+    }
 
 
 
@@ -673,7 +696,7 @@ def montar_holerite(
     payload: MontarHolerite,
     db: Session = Depends(get_db)
 ):
-    params = {"matricula": payload.matricula, "competencia": payload.competencia, "lote": payload.lote}
+    params = {"matricula": payload.matricula, "competencia": payload.competencia, "lote": payload.lote, "cpf": payload.cpf}
 
     # Cabeçalho
     sql_cabecalho = text("""
@@ -684,7 +707,8 @@ def montar_holerite(
         FROM tb_holerite_cabecalhos
         WHERE matricula   = :matricula
           AND competencia = :competencia
-          AND lote       = :lote
+          AND lote = :lote
+          AND cpf = :cpf
     """)
     cab_res = db.execute(sql_cabecalho, params)
     cab_row = cab_res.first()
@@ -698,6 +722,7 @@ def montar_holerite(
         FROM tb_holerite_eventos
         WHERE matricula   = :matricula
           AND competencia = :competencia
+          AND cpf = :cpf
         ORDER BY evento
     """)
     evt_res = db.execute(sql_eventos, params)
@@ -723,6 +748,7 @@ def montar_holerite(
         FROM tb_holerite_rodapes
         WHERE matricula   = :matricula
           AND competencia = :competencia
+          AND cpf = :cpf
     """)
     rod_res = db.execute(sql_rodape, params)
     rod_row = rod_res.first()
