@@ -88,14 +88,73 @@ def registrar_usuario(
 #         email=usuario.email
 #     )
 
-@router.post("/user/login", response_model=None, status_code=status.HTTP_200_OK)
-def login(
+# @router.post("/user/login", response_model=None, status_code=status.HTTP_200_OK)
+# def login(
+#     payload: UsuarioLogin,
+#     db: Session = Depends(get_db),
+# ):
+#     def is_email(valor: str) -> bool:
+#         return re.match(r"[^@]+@[^@]+\.[^@]+", valor) is not None
+
+#     if is_email(payload.usuario):
+#         usuario = db.query(Usuario).filter(Usuario.email == payload.usuario).first()
+#     else:
+#         pessoa = db.query(Pessoa).filter(Pessoa.cpf == payload.usuario).first()
+#         if not pessoa:
+#             raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
+#         usuario = db.query(Usuario).filter(Usuario.id_pessoa == pessoa.id).first()
+
+#     # CHANGED: verificação direta de igualdade, sem chamar verificar_senha()
+#     if not usuario or payload.senha != usuario.senha:
+#         raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
+
+#     access_token = criar_token(
+#         {"id": usuario.id_pessoa},
+#         expires_in=60 * 24 * 7
+#     )
+#     refresh_token = criar_token(
+#         {"id": usuario.id_pessoa},
+#         expires_in=60 * 24 * 30
+#     )
+#     response = JSONResponse(content={"message": "Login com sucesso"})
+#     response.set_cookie(
+#         "access_token",
+#         access_token,
+#         httponly=True,
+#         path="/",
+#         max_age=60 * 60 * 24 * 7,
+#     )
+#     response.set_cookie(
+#         "refresh_token",
+#         refresh_token,
+#         httponly=True,
+#         path="/",
+#         max_age=60 * 60 * 24 * 30,
+#     )
+#     response.set_cookie(
+#         "logged_user",
+#         "true",
+#         httponly=False,
+#         path="/",
+#         max_age=60 * 60 * 24 * 7,
+#     )
+
+#     return response
+
+@router.post(
+    "/user/login",
+    response_model=None,
+    status_code=status.HTTP_200_OK
+)
+def login_user(
     payload: UsuarioLogin,
     db: Session = Depends(get_db),
 ):
+    # helper para distinguir e-mail vs CPF
     def is_email(valor: str) -> bool:
         return re.match(r"[^@]+@[^@]+\.[^@]+", valor) is not None
 
+    # busca por e-mail ou CPF
     if is_email(payload.usuario):
         usuario = db.query(Usuario).filter(Usuario.email == payload.usuario).first()
     else:
@@ -104,10 +163,11 @@ def login(
             raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
         usuario = db.query(Usuario).filter(Usuario.id_pessoa == pessoa.id).first()
 
-    # CHANGED: verificação direta de igualdade, sem chamar verificar_senha()
-    if not usuario or payload.senha != usuario.senha:
+    # agora verifica a senha corretamente contra o hash
+    if not usuario or not verificar_senha(payload.senha, usuario.senha):
         raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
 
+    # geração dos tokens
     access_token = criar_token(
         {"id": usuario.id_pessoa},
         expires_in=60 * 24 * 7
@@ -116,27 +176,20 @@ def login(
         {"id": usuario.id_pessoa},
         expires_in=60 * 24 * 30
     )
+
+    # monta a resposta com cookies
     response = JSONResponse(content={"message": "Login com sucesso"})
     response.set_cookie(
-        "access_token",
-        access_token,
-        httponly=True,
-        path="/",
-        max_age=60 * 60 * 24 * 7,
+        "access_token", access_token,
+        httponly=True, max_age=60 * 60 * 24 * 7, path="/"
     )
     response.set_cookie(
-        "refresh_token",
-        refresh_token,
-        httponly=True,
-        path="/",
-        max_age=60 * 60 * 24 * 30,
+        "refresh_token", refresh_token,
+        httponly=True, max_age=60 * 60 * 24 * 30, path="/"
     )
     response.set_cookie(
-        "logged_user",
-        "true",
-        httponly=False,
-        path="/",
-        max_age=60 * 60 * 24 * 7,
+        "logged_user", "true",
+        httponly=False, max_age=60 * 60 * 24 * 7, path="/"
     )
 
     return response
