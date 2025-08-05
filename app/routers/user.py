@@ -24,25 +24,29 @@ cookie_env = {
     "samesite": "None" if is_prod else "Lax"
 }
 
-
-# if ENVIROMENT == "dev"
-
-@router.post("/user/register", response_model=None, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/user/register",
+    response_model=None,
+    status_code=status.HTTP_201_CREATED
+)
 def registrar_usuario(
     payload: CadastroPessoa,
     db: Session = Depends(get_db),
 ):
+    # 1) CPF não pode existir
     if db.query(Pessoa).filter(Pessoa.cpf == payload.pessoa.cpf).first():
-        raise HTTPException(status_code=400, detail="CPF já cadastrado")
-
+        raise HTTPException(400, "CPF já cadastrado")
+    # 2) Email não pode existir
     if db.query(Usuario).filter(Usuario.email == payload.usuario.email).first():
-        raise HTTPException(status_code=400, detail="Email já cadastrado")
+        raise HTTPException(400, "Email já cadastrado")
 
+    # 3) Cria Pessoa
     pessoa = Pessoa(**payload.pessoa.dict())
     db.add(pessoa)
     db.commit()
     db.refresh(pessoa)
 
+    # 4) Cria Usuário, usando o ID gerado de Pessoa
     usuario = Usuario(
         id_pessoa=pessoa.id,
         email=payload.usuario.email,

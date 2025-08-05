@@ -1,6 +1,6 @@
 # app/schemas/user.py
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from typing import Optional, Annotated
 from datetime import date
 
@@ -18,8 +18,14 @@ class PessoaBase(BaseModel):
     data_nascimento: Optional[date]
     gestor: Optional[bool]
 
-class PessoaCreate(PessoaBase):
-    pass
+class PessoaCreate(BaseModel):
+    nome: str
+    cpf: str
+    cliente: str
+    centro_de_custo: str
+    matricula: str
+    gestor: bool
+    data_nascimento: date
 
 class PessoaRead(PessoaBase):
     id: int
@@ -27,34 +33,23 @@ class PessoaRead(PessoaBase):
 #
 # Schemas para Usuário
 #
-class UsuarioBase(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+class UsuarioCreate(BaseModel):
+    email: EmailStr
+    senha: str
 
-    id_pessoa: int
-    nome: str
-    cpf: Annotated[str, Field(min_length=11, max_length=14)]
-
-class UsuarioCreate(UsuarioBase):
-    senha: Annotated[str, Field(min_length=6)]
-
-class UsuarioRead(UsuarioBase):
+class UsuarioRead(BaseModel):
     id: int
-
-#
-# Wrappers para registro, login e respostas
+    email: EmailStr
+    id_pessoa: int
 #
 class CadastroPessoa(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
     pessoa: PessoaCreate
-    usuario: UsuarioCreate
+    usuario: "UsuarioCreate"
 
 class UsuarioLogin(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-
-    usuario: str   # pode ser e-mail ou CPF
+    usuario: str   # e-mail ou CPF
     senha: str
-
 class PessoaResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -64,7 +59,7 @@ class PessoaResponse(BaseModel):
     centro_de_custo: Optional[str]
     matricula: Optional[str]
     gestor: Optional[bool]
-    email: str     # do Usuario associado
+    email: str     # do Usuário associado
 
 class CadastroColaborador(BaseModel):
     model_config = ConfigDict(from_attributes=True)
