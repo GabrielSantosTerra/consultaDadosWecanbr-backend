@@ -54,6 +54,7 @@ class SearchDocumentosRequest(BaseModel):
     campo_anomes: str
 
 class BuscarHolerite(BaseModel):
+    cpf: str = Field(..., min_length=11, max_length=14, description="CPF sem formatação, 11 dígitos")
     matricula: str
     competencia: str
 
@@ -313,39 +314,35 @@ def buscar_search_documentos(payload: SearchDocumentosRequest):
 
 # ********************************************
 @router.post("/documents/holerite/buscar")
-def montar_holerite(
+def buscar_holerite(
     payload: BuscarHolerite,
     db: Session = Depends(get_db),
 ):
     """
-    Busca todos os registros de holerite cuja matrícula e competência
-    sejam iguais aos valores passados no payload.
+    Busca registros de holerite por CPF, matrícula e competência.
     """
 
-    # ■ Monta e executa o SQL raw
     sql = text("""
         SELECT *
         FROM tb_holerite_cabecalhos
-        WHERE matricula   = :matricula
+        WHERE cpf         = :cpf
+          AND matricula   = :matricula
           AND competencia = :competencia
     """)
-    result = db.execute(
-        sql,
-        {
-            "matricula": payload.matricula,
-            "competencia": payload.competencia,
-        },
-    )
+    params = {
+        "cpf": payload.cpf,
+        "matricula": payload.matricula,
+        "competencia": payload.competencia,
+    }
+    result = db.execute(sql, params)
     rows = result.fetchall()
 
-    # ■ Se não encontrou nada, retorna 404
     if not rows:
         raise HTTPException(
             status_code=404,
-            detail="Nenhum holerite encontrado para matrícula e competência informados"
+            detail="Nenhum holerite encontrado para CPF, matrícula e competência informados"
         )
 
-    # ■ Converte cada linha em dict (coluna→valor)
     columns = result.keys()
     registros = [dict(zip(columns, row)) for row in rows]
 
