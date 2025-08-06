@@ -318,35 +318,69 @@ def buscar_holerite(
     payload: BuscarHolerite,
     db: Session = Depends(get_db),
 ):
-    """
-    Busca registros de holerite por CPF, matrícula e competência.
-    """
+    params = {
+        "cpf": payload.cpf,
+        "matricula": payload.matricula,
+        "competencia": payload.competencia,
+    }
 
-    sql = text("""
+    # 1) Cabeçalho
+    sql_cabecalho = text("""
         SELECT *
         FROM tb_holerite_cabecalhos
         WHERE cpf         = :cpf
           AND matricula   = :matricula
           AND competencia = :competencia
     """)
-    params = {
-        "cpf": payload.cpf,
-        "matricula": payload.matricula,
-        "competencia": payload.competencia,
-    }
-    result = db.execute(sql, params)
-    rows = result.fetchall()
-
-    if not rows:
+    cab_res = db.execute(sql_cabecalho, params)
+    cab_row = cab_res.first()
+    if not cab_row:
         raise HTTPException(
             status_code=404,
-            detail="Nenhum holerite encontrado para CPF, matrícula e competência informados"
+            detail="Nenhum cabeçalho de holerite encontrado para os critérios informados"
         )
+    cabecalho = dict(zip(cab_res.keys(), cab_row))
 
-    columns = result.keys()
-    registros = [dict(zip(columns, row)) for row in rows]
+    # 2) Eventos
+    sql_eventos = text("""
+        SELECT *
+        FROM tb_holerite_eventos
+        WHERE cpf         = :cpf
+          AND matricula   = :matricula
+          AND competencia = :competencia
+        ORDER BY evento
+    """)
+    evt_res = db.execute(sql_eventos, params)
+    evt_rows = evt_res.fetchall()
+    if not evt_rows:
+        raise HTTPException(
+            status_code=404,
+            detail="Nenhum evento de holerite encontrado para os critérios informados"
+        )
+    eventos = [dict(zip(evt_res.keys(), row)) for row in evt_rows]
 
-    return registros
+    # 3) Rodapé
+    sql_rodape = text("""
+        SELECT *
+        FROM tb_holerite_rodapes
+        WHERE cpf         = :cpf
+          AND matricula   = :matricula
+          AND competencia = :competencia
+    """)
+    rod_res = db.execute(sql_rodape, params)
+    rod_row = rod_res.first()
+    if not rod_row:
+        raise HTTPException(
+            status_code=404,
+            detail="Nenhum rodapé de holerite encontrado para os critérios informados"
+        )
+    rodape = dict(zip(rod_res.keys(), rod_row))
+
+    return {
+        "cabecalho": cabecalho,
+        "eventos": eventos,
+        "rodape": rodape
+    }
 
 # @router.post("/documents/holerite/montar")
 # def montar_holerite(
