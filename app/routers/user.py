@@ -182,6 +182,7 @@ def login_user(
     response.set_cookie(
         "access_token", access_token,
         httponly=True, max_age=60 , path="/"
+        # * 60 * 24 * 7
     )
     response.set_cookie(
         "refresh_token", refresh_token,
@@ -208,14 +209,18 @@ def get_me(request: Request, db: Session = Depends(get_db)):
     if not jti:
         raise HTTPException(status_code=401, detail="Token sem identificador único (jti)")
 
-    # ❌ Verifica se esse jti está na blacklist
     if db.query(TokenBlacklist).filter_by(jti=jti).first():
         raise HTTPException(status_code=401, detail="Token expirado ou inválido")
 
-    pessoa = db.query(Pessoa).filter(Pessoa.id == payload.get("id")).first()
+    pessoa_id = payload.get("id")
+    pessoa = db.query(Pessoa).filter(Pessoa.id == pessoa_id).first()
+
+    if not pessoa:
+        raise HTTPException(status_code=401, detail="Pessoa não encontrada")
+
     usuario = db.query(Usuario).filter(Usuario.id_pessoa == pessoa.id).first()
 
-    if not pessoa or not usuario:
+    if not usuario:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
 
     return PessoaResponse(
@@ -247,7 +252,7 @@ def refresh_token(request: Request, db: Session = Depends(get_db)):
     if not usuario:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
 
-    novo_auth = criar_token({"sub": usuario.email}, expires_in=60 * 24 * 7)
+    novo_auth = criar_token({"id": usuario.id_pessoa, "sub": usuario.email, "tipo": "access"}, expires_in=60 * 24 * 7)
     novo_logged = criar_token({"logged": True}, expires_in=60 * 24 * 7)
 
     response = JSONResponse(content={"message": "Token renovado"})
