@@ -169,11 +169,11 @@ def login_user(
 
     # geração dos tokens
     access_token = criar_token(
-        {"id": usuario.id_pessoa},
+        {"id": usuario.id_pessoa, "sub": usuario.email, "tipo": "access"},
         expires_in=60 * 24 * 7
     )
     refresh_token = criar_token(
-        {"id": usuario.id_pessoa},
+        {"id": usuario.id_pessoa, "sub": usuario.email, "tipo": "refresh"},
         expires_in=60 * 24 * 30
     )
 
