@@ -21,7 +21,7 @@ is_prod = os.getenv('ENVIRONMENT') == "prod"
 
 cookie_env = {
     "secure": is_prod,
-    "samesite": "None" if is_prod else "Lax"
+    "samesite": "Lax" if is_prod else "Strict"
 }
 
 @router.post(
