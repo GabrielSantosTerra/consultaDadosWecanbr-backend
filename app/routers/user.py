@@ -252,11 +252,10 @@ def refresh_token(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
 
     novo_auth = criar_token({"id": usuario.id_pessoa, "sub": usuario.email, "tipo": "access"}, expires_in=60 * 24 * 7)
-    novo_logged = criar_token({"logged": True}, expires_in=60 * 24 * 7)
 
     response = JSONResponse(content={"message": "Token renovado"})
     response.set_cookie("access_token", novo_auth, httponly=True, path="/", max_age=60 * 60 * 24 * 7, **cookie_env)
-    response.set_cookie("logged_user", novo_logged, httponly=True, path="/", max_age=60 * 60 * 24 * 7, **cookie_env)
+    response.set_cookie("logged_user", "true", httponly=False, path="/", max_age=60 * 60 * 24 * 7, **cookie_env)
 
     return response
 
