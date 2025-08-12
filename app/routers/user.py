@@ -181,15 +181,15 @@ def login_user(
     response = JSONResponse(content={"message": "Login com sucesso"})
     response.set_cookie(
         "access_token", access_token,
-        httponly=True, max_age=60 * 60 * 24 * 7, path="/"
+        httponly=True, max_age=60 * 60 * 24 * 7, path="/", **cookie_env
     )
     response.set_cookie(
         "refresh_token", refresh_token,
-        httponly=True, max_age=60 * 60 * 24 * 30, path="/"
+        httponly=True, max_age=60 * 60 * 24 * 30, path="/", **cookie_env
     )
     response.set_cookie(
         "logged_user", "true",
-        httponly=False, max_age=60 * 60 * 24 * 7, path="/"
+        httponly=False, max_age=60 * 60 * 24 * 7, path="/", **cookie_env
     )
 
     return response
