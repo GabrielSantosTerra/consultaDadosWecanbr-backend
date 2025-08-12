@@ -19,9 +19,12 @@ router = APIRouter()
 load_dotenv()
 is_prod = os.getenv('ENVIRONMENT') == "prod"
 
+cookie_domain = "ziondocs.com.br" if is_prod else None
+
 cookie_env = {
-    "secure": is_prod,
-    "samesite": "Strict" if is_prod else "Lax"
+    "secure": True if is_prod else False,
+    "samesite": "Lax",
+    "domain": cookie_domain
 }
 
 @router.post(
@@ -274,8 +277,8 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
     else:
         print("[LOGOUT] Token não enviado")
 
-    response.delete_cookie("access_token", path="/")
-    response.delete_cookie("refresh_token", path="/")
-    response.delete_cookie("logged_user", path="/")
+    response.delete_cookie("access_token", path="/", domain=cookie_domain)
+    response.delete_cookie("refresh_token", path="/", domain=cookie_domain)
+    response.delete_cookie("logged_user", path="/", domain=cookie_domain)
 
     return {"message": "Logout realizado com sucesso"}
