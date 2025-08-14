@@ -167,7 +167,10 @@ def login_user(
         usuario = db.query(Usuario).filter(Usuario.id_pessoa == pessoa.id).first()
 
     # agora verifica a senha corretamente contra o hash
-    if not usuario or not verificar_senha(payload.senha, usuario.senha):
+    # if not usuario or not verificar_senha(payload.senha, usuario.senha):
+    #     raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
+
+    if not usuario or not payload.senha == usuario.senha:
         raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
 
     # geração dos tokens
