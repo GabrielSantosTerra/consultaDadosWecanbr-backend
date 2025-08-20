@@ -2,7 +2,7 @@ from urllib import response
 from fastapi import APIRouter, HTTPException, Form, Depends, Response
 from typing import Any, Literal, Dict, Optional
 import requests
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from fastapi.responses import JSONResponse
 from datetime import datetime
 from babel.dates import format_date
@@ -52,17 +52,8 @@ class SearchDocumentosRequest(BaseModel):
     id_template: int | str
     cp: List[CampoValor] = Field(default_factory=list)
     campo_anomes: str
-    anomes: str  # aceita "YYYY-MM", "YYYYMM", "YYYY/MM" ou "MM/YYYY"
-
-    # opções de como enviar o anomes para o GED:
-    filtrar_no_ged: bool = True
-    formato_envio_anomes: Literal["YYYY-MM", "YYYYMM"] = "YYYY-MM"
-
-    # parâmetros GED padrão
-    pagina: int = Field(1, ge=1)
-    colecao: str = Field("S")
-    ordem: str = Field("no_ordem")  # ver valores válidos no manual
-    dt_criacao: str = ""            # deixar vazio se não for usar
+    anomes: Optional[str] = None           # ex.: "2025-05", "202505", "2025/05", "05/2025"
+    anomes_in: Optional[List[str]] = None  # ex.: ["2025-05", "2025-02"]
 
     @field_validator("campo_anomes")
     @classmethod
@@ -71,6 +62,12 @@ class SearchDocumentosRequest(BaseModel):
         if not v:
             raise ValueError("campo_anomes é obrigatório")
         return v
+
+    @model_validator(mode="after")
+    def _precisa_ao_menos_um_anomes(self):
+        if not self.anomes and not self.anomes_in:
+            raise ValueError("Envie 'anomes' ou 'anomes_in'.")
+        return self
 
 class BuscarHolerite(BaseModel):
     cpf: str = Field(..., min_length=11, max_length=14, description="CPF sem formatação, 11 dígitos")
@@ -100,43 +97,36 @@ def _headers(auth_key: str) -> Dict[str, str]:
         "Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-1",
     }
 
-def _normaliza_anomes(valor: str) -> Optional[str]:
-    """Normaliza para 'YYYY-MM' se possível."""
+def _normaliza_anomes(valor: str) -> str | None:
     v = (valor or "").strip()
     if not v:
         return None
-    # já é YYYY-MM?
     try:
         datetime.strptime(v, "%Y-%m")
         return v
     except ValueError:
         pass
-    # YYYYMM -> YYYY-MM
-    if len(v) == 6 and v.isdigit():
+    if len(v) == 6 and v.isdigit():          # YYYYMM
         return f"{v[:4]}-{v[4:]}"
-    # YYYY/MM
-    if "/" in v:
+    if "/" in v:                              # YYYY/MM ou MM/YYYY
         a, b = v.split("/", 1)
         if len(a) == 4 and b.isdigit():
             return f"{a}-{b.zfill(2)}"
-        if len(b) == 4 and a.isdigit():  # MM/YYYY
+        if len(b) == 4 and a.isdigit():
             return f"{b}-{a.zfill(2)}"
-    # YYYY-M
-    if "-" in v:
-        p = v.split("-")
-        if len(p) == 2 and len(p[0]) == 4 and p[1].isdigit():
-            return f"{p[0]}-{p[1].zfill(2)}"
+    if "-" in v:                              # YYYY-M
+        a, b = v.split("-", 1)
+        if len(a) == 4 and b.isdigit():
+            return f"{a}-{b.zfill(2)}"
     return None
 
 def _flatten_attributes(document: Dict[str, Any]) -> Dict[str, Any]:
-    """Move attributes[] para o nível raiz do doc."""
-    doc = dict(document)
-    for a in (doc.pop("attributes", []) or []):
-        nome, valor = a.get("name"), a.get("value")
-        if nome:
-            doc[nome] = valor
-    return doc
-
+    d = dict(document)
+    for a in (d.pop("attributes", []) or []):
+        n, val = a.get("name"), a.get("value")
+        if n:
+            d[n] = val
+    return d
 BASE_URL = "http://ged.byebyepaper.com.br:9090/idocs_bbpaper/api/v1"
 
 def login(conta: str, usuario: str, senha: str) -> str:
@@ -374,7 +364,7 @@ def upload_documento_base64(payload: UploadBase64Payload):
 
 @router.post("/documents/search")
 def buscar_search_documentos(payload: SearchDocumentosRequest):
-    # autentica
+    # 1) Autentica
     try:
         auth_key = login(
             conta=settings.GED_CONTA, usuario=settings.GED_USUARIO, senha=settings.GED_SENHA
@@ -384,7 +374,7 @@ def buscar_search_documentos(payload: SearchDocumentosRequest):
 
     headers = _headers(auth_key)
 
-    # campos do template
+    # 2) Campos do template
     r_fields = requests.post(
         f"{BASE_URL}/templates/getfields",
         data={"id_template": payload.id_template},
@@ -399,19 +389,31 @@ def buscar_search_documentos(payload: SearchDocumentosRequest):
     if payload.campo_anomes not in nomes_campos:
         raise HTTPException(400, f"Campo '{payload.campo_anomes}' não existe no template")
 
-    # cp[] na ordem do template (sem injetar anomes)
+    # 3) cp[] na ordem do template (sem injetar anomes)
     lista_cp = ["" for _ in nomes_campos]
     for item in payload.cp:
         if item.nome not in nomes_campos:
             raise HTTPException(400, f"Campo '{item.nome}' não existe no template")
         lista_cp[nomes_campos.index(item.nome)] = item.valor
 
-    # normaliza anomes alvo (YYYY-MM)
-    norm = _normaliza_anomes(payload.anomes)
-    if not norm:
-        raise HTTPException(400, "anomes inválido. Use 'YYYY-MM', 'YYYYMM', 'YYYY/MM' ou 'MM/YYYY'.")
+    # 4) Monta conjunto de meses-alvo (YYYY-MM)
+    alvo: set[str] = set()
+    if payload.anomes:
+        n = _normaliza_anomes(payload.anomes)
+        if not n:
+            raise HTTPException(400, "anomes inválido. Use 'YYYY-MM', 'YYYYMM', 'YYYY/MM' ou 'MM/YYYY'.")
+        alvo.add(n)
+    if payload.anomes_in:
+        for val in payload.anomes_in:
+            n = _normaliza_anomes(val)
+            if not n:
+                raise HTTPException(400, f"Valor inválido em anomes_in: '{val}'")
+            alvo.add(n)
 
-    # payload GED mínimo
+    if not alvo:
+        raise HTTPException(400, "Nenhum 'anomes' válido após normalização.")
+
+    # 5) Payload mínimo do GED
     form = [("id_tipo", str(payload.id_template))]
     form += [("cp[]", v) for v in lista_cp]
     form += [
@@ -421,7 +423,7 @@ def buscar_search_documentos(payload: SearchDocumentosRequest):
         ("colecao", "S"),
     ]
 
-    # busca no GED
+    # 6) Consulta GED
     try:
         r = requests.post(f"{BASE_URL}/documents/search", data=form, headers=headers, timeout=60)
         r.raise_for_status()
@@ -437,10 +439,10 @@ def buscar_search_documentos(payload: SearchDocumentosRequest):
     if data.get("error"):
         raise HTTPException(500, f"GED erro: {data.get('message')}")
 
-    # flatten + filtro exato por anomes
+    # 7) Flatten + filtro por conjunto de meses
     documentos_total = [_flatten_attributes(doc) for doc in (data.get("documents") or [])]
 
-    filtrados = []
+    filtrados: List[Dict[str, Any]] = []
     for d in documentos_total:
         bruto = str(d.get(payload.campo_anomes, "")).strip()
         if len(bruto) == 6 and bruto.isdigit():
@@ -449,19 +451,19 @@ def buscar_search_documentos(payload: SearchDocumentosRequest):
             datetime.strptime(bruto, "%Y-%m")
         except ValueError:
             continue
-        if bruto == norm:
+        if bruto in alvo:
             d["_norm_anomes"] = bruto
             filtrados.append(d)
 
     filtrados.sort(key=lambda x: x["_norm_anomes"], reverse=True)
 
+    # 8) Retorno compatível (lista com todos os meses requisitados)
     return {
         "total_bruto": len(documentos_total),
-        "ultimos_6_meses": [norm],  # mantemos a mesma chave, agora focada no mês exato
+        "ultimos_6_meses": sorted(alvo, reverse=True),  # mantém a chave p/ não quebrar o front
         "total_encontrado": len(filtrados),
         "documentos": filtrados,
     }
-
 # ********************************************
 @router.post("/documents/holerite/buscar")
 def buscar_holerite(
