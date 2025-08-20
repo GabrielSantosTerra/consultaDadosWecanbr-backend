@@ -1,8 +1,8 @@
 from urllib import response
 from fastapi import APIRouter, HTTPException, Form, Depends, Response
-from typing import Any
+from typing import Any, Literal, Dict, Optional
 import requests
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from fastapi.responses import JSONResponse
 from datetime import datetime
 from babel.dates import format_date
@@ -49,9 +49,28 @@ class CampoValor(BaseModel):
     valor: str
 
 class SearchDocumentosRequest(BaseModel):
-    id_template: int
-    cp: List[CampoValor]  # incluirá matrícula como no modelo atual
+    id_template: int | str
+    cp: List[CampoValor] = Field(default_factory=list)
     campo_anomes: str
+    anomes: str  # aceita "YYYY-MM", "YYYYMM", "YYYY/MM" ou "MM/YYYY"
+
+    # opções de como enviar o anomes para o GED:
+    filtrar_no_ged: bool = True
+    formato_envio_anomes: Literal["YYYY-MM", "YYYYMM"] = "YYYY-MM"
+
+    # parâmetros GED padrão
+    pagina: int = Field(1, ge=1)
+    colecao: str = Field("S")
+    ordem: str = Field("no_ordem")  # ver valores válidos no manual
+    dt_criacao: str = ""            # deixar vazio se não for usar
+
+    @field_validator("campo_anomes")
+    @classmethod
+    def _valida_campo_anomes(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("campo_anomes é obrigatório")
+        return v
 
 class BuscarHolerite(BaseModel):
     cpf: str = Field(..., min_length=11, max_length=14, description="CPF sem formatação, 11 dígitos")
@@ -74,6 +93,49 @@ class UploadBase64Payload(BaseModel):
     documento_nome: str
     documento_base64: str
     campos: List[CampoConsulta]
+
+def _headers(auth_key: str) -> Dict[str, str]:
+    return {
+        "Authorization": auth_key,
+        "Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-1",
+    }
+
+def _normaliza_anomes(valor: str) -> Optional[str]:
+    """Normaliza para 'YYYY-MM' se possível."""
+    v = (valor or "").strip()
+    if not v:
+        return None
+    # já é YYYY-MM?
+    try:
+        datetime.strptime(v, "%Y-%m")
+        return v
+    except ValueError:
+        pass
+    # YYYYMM -> YYYY-MM
+    if len(v) == 6 and v.isdigit():
+        return f"{v[:4]}-{v[4:]}"
+    # YYYY/MM
+    if "/" in v:
+        a, b = v.split("/", 1)
+        if len(a) == 4 and b.isdigit():
+            return f"{a}-{b.zfill(2)}"
+        if len(b) == 4 and a.isdigit():  # MM/YYYY
+            return f"{b}-{a.zfill(2)}"
+    # YYYY-M
+    if "-" in v:
+        p = v.split("-")
+        if len(p) == 2 and len(p[0]) == 4 and p[1].isdigit():
+            return f"{p[0]}-{p[1].zfill(2)}"
+    return None
+
+def _flatten_attributes(document: Dict[str, Any]) -> Dict[str, Any]:
+    """Move attributes[] para o nível raiz do doc."""
+    doc = dict(document)
+    for a in (doc.pop("attributes", []) or []):
+        nome, valor = a.get("name"), a.get("value")
+        if nome:
+            doc[nome] = valor
+    return doc
 
 BASE_URL = "http://ged.byebyepaper.com.br:9090/idocs_bbpaper/api/v1"
 
@@ -205,112 +267,200 @@ def upload_documento_base64(payload: UploadBase64Payload):
     except Exception:
         raise HTTPException(status_code=500, detail=f"Erro no upload: {response.text}")
 
+# @router.post("/documents/search")
+# def buscar_search_documentos(payload: SearchDocumentosRequest):
+#     # 1) Autentica no GED
+#     auth_key = login(
+#         conta=settings.GED_CONTA,
+#         usuario=settings.GED_USUARIO,
+#         senha=settings.GED_SENHA
+#     )
+#     headers = {
+#         "Authorization": auth_key,
+#         "Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-1"
+#     }
+
+#     # 2) Obtém definição de campos do template
+#     resp_fields = requests.post(
+#         f"{BASE_URL}/templates/getfields",
+#         data={"id_template": payload.id_template},
+#         headers=headers
+#     )
+#     resp_fields.raise_for_status()
+#     nomes_campos = [f["nomecampo"] for f in resp_fields.json().get("fields", [])]
+
+#     # 3) Monta a lista cp[] na ordem exata
+#     lista_cp = ["" for _ in nomes_campos]
+#     for item in payload.cp:
+#         if item.nome not in nomes_campos:
+#             raise HTTPException(400, f"Campo '{item.nome}' não existe no template")
+#         lista_cp[nomes_campos.index(item.nome)] = item.valor
+
+#     if payload.campo_anomes not in nomes_campos:
+#         raise HTTPException(400, f"Campo '{payload.campo_anomes}' não existe no template")
+
+#     # 4) Monta payload de busca (id_tipo, cp[], ordem, dt_criacao, pagina, colecao)
+#     payload_busca = [("id_tipo", str(payload.id_template))]
+#     payload_busca += [("cp[]", v) for v in lista_cp]
+#     payload_busca += [
+#         ("ordem", "no_ordem"),
+#         ("dt_criacao", ""),
+#         ("pagina", "1"),
+#         ("colecao", "S"),
+#     ]
+
+#     # 5) Executa busca
+#     resp_busca = requests.post(
+#         f"{BASE_URL}/documents/search",
+#         data=payload_busca,
+#         headers=headers
+#     )
+#     resp_busca.raise_for_status()
+#     data = resp_busca.json()
+#     if data.get("error"):
+#         raise HTTPException(500, f"GED erro: {data.get('message')}")
+
+#     # 6) Desenvelopa atributos
+#     documentos_total = []
+#     for doc in data.get("documents", []):
+#         for attr in doc.pop("attributes", []):
+#             doc[attr["name"]] = attr["value"]
+#         documentos_total.append(doc)
+
+#     # 7) Normaliza "anomes" para YYYY-MM e converte em datetime
+#     datas_doc = []
+#     for d in documentos_total:
+#         raw = d.get(payload.campo_anomes, "")
+#         # se vier 'YYYY-MM' mantém, se vier 'YYYYMM' converte
+#         if len(raw) == 6 and raw.isdigit():
+#             norm = f"{raw[:4]}-{raw[4:]}"
+#         else:
+#             norm = raw
+#         try:
+#             dt = datetime.strptime(norm, "%Y-%m")
+#             d["_norm_anomes"] = norm
+#             datas_doc.append(dt)
+#         except ValueError:
+#             # ignora formatos inválidos
+#             continue
+
+#     # 8) Define base como a data mais recente encontrada (ou hoje se nenhuma)
+#     if datas_doc:
+#         base = max(datas_doc)
+#     else:
+#         base = datetime.today().replace(day=1)
+
+#     # 9) Monta janela dos últimos 6 meses a partir da base dinâmica
+#     ultimos_6 = {
+#         (base - relativedelta(months=i)).strftime("%Y-%m")
+#         for i in range(6)
+#     }
+
+#     # 10) Filtra documentos dessa janela
+#     docs_filtrados = [
+#         d for d in documentos_total
+#         if d.get("_norm_anomes") in ultimos_6
+#     ]
+#     docs_filtrados.sort(key=lambda d: d["_norm_anomes"], reverse=True)
+
+#     # 11) Retorna resultado (FastAPI converte o dict em JSON)
+#     return {
+#         "total_bruto": len(documentos_total),
+#         "ultimos_6_meses": sorted(ultimos_6, reverse=True),
+#         "total_encontrado": len(docs_filtrados),
+#         "documentos": docs_filtrados
+#     }
+
+
 @router.post("/documents/search")
 def buscar_search_documentos(payload: SearchDocumentosRequest):
-    # 1) Autentica no GED
-    auth_key = login(
-        conta=settings.GED_CONTA,
-        usuario=settings.GED_USUARIO,
-        senha=settings.GED_SENHA
-    )
-    headers = {
-        "Authorization": auth_key,
-        "Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-1"
-    }
+    # autentica
+    try:
+        auth_key = login(
+            conta=settings.GED_CONTA, usuario=settings.GED_USUARIO, senha=settings.GED_SENHA
+        )
+    except Exception as e:
+        raise HTTPException(502, f"Falha na autenticação no GED: {e}")
 
-    # 2) Obtém definição de campos do template
-    resp_fields = requests.post(
+    headers = _headers(auth_key)
+
+    # campos do template
+    r_fields = requests.post(
         f"{BASE_URL}/templates/getfields",
         data={"id_template": payload.id_template},
-        headers=headers
+        headers=headers,
+        timeout=30,
     )
-    resp_fields.raise_for_status()
-    nomes_campos = [f["nomecampo"] for f in resp_fields.json().get("fields", [])]
+    r_fields.raise_for_status()
+    nomes_campos = [f.get("nomecampo") for f in (r_fields.json() or {}).get("fields", []) if f.get("nomecampo")]
 
-    # 3) Monta a lista cp[] na ordem exata
+    if not nomes_campos:
+        raise HTTPException(400, "Template sem campos ou inválido")
+    if payload.campo_anomes not in nomes_campos:
+        raise HTTPException(400, f"Campo '{payload.campo_anomes}' não existe no template")
+
+    # cp[] na ordem do template (sem injetar anomes)
     lista_cp = ["" for _ in nomes_campos]
     for item in payload.cp:
         if item.nome not in nomes_campos:
             raise HTTPException(400, f"Campo '{item.nome}' não existe no template")
         lista_cp[nomes_campos.index(item.nome)] = item.valor
 
-    if payload.campo_anomes not in nomes_campos:
-        raise HTTPException(400, f"Campo '{payload.campo_anomes}' não existe no template")
+    # normaliza anomes alvo (YYYY-MM)
+    norm = _normaliza_anomes(payload.anomes)
+    if not norm:
+        raise HTTPException(400, "anomes inválido. Use 'YYYY-MM', 'YYYYMM', 'YYYY/MM' ou 'MM/YYYY'.")
 
-    # 4) Monta payload de busca (id_tipo, cp[], ordem, dt_criacao, pagina, colecao)
-    payload_busca = [("id_tipo", str(payload.id_template))]
-    payload_busca += [("cp[]", v) for v in lista_cp]
-    payload_busca += [
+    # payload GED mínimo
+    form = [("id_tipo", str(payload.id_template))]
+    form += [("cp[]", v) for v in lista_cp]
+    form += [
         ("ordem", "no_ordem"),
         ("dt_criacao", ""),
         ("pagina", "1"),
         ("colecao", "S"),
     ]
 
-    # 5) Executa busca
-    resp_busca = requests.post(
-        f"{BASE_URL}/documents/search",
-        data=payload_busca,
-        headers=headers
-    )
-    resp_busca.raise_for_status()
-    data = resp_busca.json()
+    # busca no GED
+    try:
+        r = requests.post(f"{BASE_URL}/documents/search", data=form, headers=headers, timeout=60)
+        r.raise_for_status()
+    except requests.HTTPError:
+        try:
+            raise HTTPException(r.status_code, f"GED erro: {r.json()}")
+        except Exception:
+            raise HTTPException(r.status_code, f"GED erro: {r.text}")
+    except requests.RequestException as e:
+        raise HTTPException(502, f"Falha ao consultar GED: {e}")
+
+    data = r.json() or {}
     if data.get("error"):
         raise HTTPException(500, f"GED erro: {data.get('message')}")
 
-    # 6) Desenvelopa atributos
-    documentos_total = []
-    for doc in data.get("documents", []):
-        for attr in doc.pop("attributes", []):
-            doc[attr["name"]] = attr["value"]
-        documentos_total.append(doc)
+    # flatten + filtro exato por anomes
+    documentos_total = [_flatten_attributes(doc) for doc in (data.get("documents") or [])]
 
-    # 7) Normaliza "anomes" para YYYY-MM e converte em datetime
-    datas_doc = []
+    filtrados = []
     for d in documentos_total:
-        raw = d.get(payload.campo_anomes, "")
-        # se vier 'YYYY-MM' mantém, se vier 'YYYYMM' converte
-        if len(raw) == 6 and raw.isdigit():
-            norm = f"{raw[:4]}-{raw[4:]}"
-        else:
-            norm = raw
+        bruto = str(d.get(payload.campo_anomes, "")).strip()
+        if len(bruto) == 6 and bruto.isdigit():
+            bruto = f"{bruto[:4]}-{bruto[4:]}"
         try:
-            dt = datetime.strptime(norm, "%Y-%m")
-            d["_norm_anomes"] = norm
-            datas_doc.append(dt)
+            datetime.strptime(bruto, "%Y-%m")
         except ValueError:
-            # ignora formatos inválidos
             continue
+        if bruto == norm:
+            d["_norm_anomes"] = bruto
+            filtrados.append(d)
 
-    # 8) Define base como a data mais recente encontrada (ou hoje se nenhuma)
-    if datas_doc:
-        base = max(datas_doc)
-    else:
-        base = datetime.today().replace(day=1)
+    filtrados.sort(key=lambda x: x["_norm_anomes"], reverse=True)
 
-    # 9) Monta janela dos últimos 6 meses a partir da base dinâmica
-    ultimos_6 = {
-        (base - relativedelta(months=i)).strftime("%Y-%m")
-        for i in range(6)
-    }
-
-    # 10) Filtra documentos dessa janela
-    docs_filtrados = [
-        d for d in documentos_total
-        if d.get("_norm_anomes") in ultimos_6
-    ]
-    docs_filtrados.sort(key=lambda d: d["_norm_anomes"], reverse=True)
-
-    # 11) Retorna resultado (FastAPI converte o dict em JSON)
     return {
         "total_bruto": len(documentos_total),
-        "ultimos_6_meses": sorted(ultimos_6, reverse=True),
-        "total_encontrado": len(docs_filtrados),
-        "documentos": docs_filtrados
+        "ultimos_6_meses": [norm],  # mantemos a mesma chave, agora focada no mês exato
+        "total_encontrado": len(filtrados),
+        "documentos": filtrados,
     }
-
-
-
 
 # ********************************************
 @router.post("/documents/holerite/buscar")
