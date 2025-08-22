@@ -91,6 +91,28 @@ class UploadBase64Payload(BaseModel):
     documento_base64: str
     campos: List[CampoConsulta]
 
+def _split_competencia(raw: str) -> tuple[int, str]:
+    """
+    Aceita formatos: 'YYYYMM', 'YYYY-MM', 'YYYY-MM-DD'
+    Retorna: (ano:int, mes:'MM')
+    """
+    s = str(raw).strip()
+    if "-" in s:
+        # pega até 'YYYY-MM'
+        partes = s.split("-")
+        if len(partes) >= 2:
+            ano = int(partes[0])
+            mes = partes[1][:2].zfill(2)
+            return ano, mes
+        # fallback
+        s = "".join(partes)
+    # formatos compactos
+    if len(s) >= 6:
+        ano = int(s[:4])
+        mes = s[4:6]
+        return ano, mes
+    raise ValueError(f"Formato de competência inválido: {raw}")
+
 def _headers(auth_key: str) -> Dict[str, str]:
     return {
         "Authorization": auth_key,
@@ -467,13 +489,45 @@ def buscar_search_documentos(payload: SearchDocumentosRequest):
 # ********************************************
 @router.post("/documents/holerite/buscar")
 def buscar_holerite(
-    payload: BuscarHolerite,
+    payload: "BuscarHolerite",
     db: Session = Depends(get_db),
 ):
+    # Se NÃO vier competência -> listar competências disponíveis (somente ano/mes)
+    if not getattr(payload, "competencia", None):
+        sql_lista_comp = text("""
+            SELECT DISTINCT competencia
+            FROM tb_holerite_cabecalhos
+            WHERE cpf = :cpf AND matricula = :matricula
+            ORDER BY competencia DESC
+        """)
+        rows = db.execute(sql_lista_comp, {"cpf": payload.cpf, "matricula": payload.matricula}).fetchall()
+        if not rows:
+            raise HTTPException(
+                status_code=404,
+                detail="Nenhuma competência encontrada para os critérios informados (cpf/matricula)."
+            )
+
+        competencias = []
+        for (comp_raw,) in rows:
+            try:
+                ano, mes = _split_competencia(comp_raw)
+                competencias.append({"ano": ano, "mes": mes})
+            except Exception:
+                # ignora formatos inesperados
+                continue
+
+        # garante ordenação (caso algum formato inesperado passe), desc por ano/mes
+        competencias.sort(key=lambda x: (x["ano"], x["mes"]), reverse=True)
+
+        # retorna SOMENTE anos/meses conforme solicitado
+        return {"competencias": competencias}
+
+    # Se vier competência -> fluxo original
+    competencia_escolhida = payload.competencia
     params = {
         "cpf": payload.cpf,
         "matricula": payload.matricula,
-        "competencia": payload.competencia,
+        "competencia": competencia_escolhida,
     }
 
     # 1) Cabeçalho
@@ -489,7 +543,7 @@ def buscar_holerite(
     if not cab_row:
         raise HTTPException(
             status_code=404,
-            detail="Nenhum cabeçalho de holerite encontrado para os critérios informados"
+            detail="Nenhum cabeçalho de holerite encontrado para os critérios informados."
         )
     cabecalho = dict(zip(cab_res.keys(), cab_row))
 
@@ -507,7 +561,7 @@ def buscar_holerite(
     if not evt_rows:
         raise HTTPException(
             status_code=404,
-            detail="Nenhum evento de holerite encontrado para os critérios informados"
+            detail="Nenhum evento de holerite encontrado para os critérios informados."
         )
     eventos = [dict(zip(evt_res.keys(), row)) for row in evt_rows]
 
@@ -524,11 +578,12 @@ def buscar_holerite(
     if not rod_row:
         raise HTTPException(
             status_code=404,
-            detail="Nenhum rodapé de holerite encontrado para os critérios informados"
+            detail="Nenhum rodapé de holerite encontrado para os critérios informados."
         )
     rodape = dict(zip(rod_res.keys(), rod_row))
 
     return {
+        "competencia_utilizada": competencia_escolhida,
         "cabecalho": cabecalho,
         "eventos": eventos,
         "rodape": rodape
