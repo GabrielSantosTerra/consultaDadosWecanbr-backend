@@ -1,2 +1,0 @@
-buildpacks:
-  - https://github.com/siduck/render-buildpack-poppler.git
