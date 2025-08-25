@@ -1,6 +1,6 @@
 from urllib import response
 from fastapi import APIRouter, HTTPException, Form, Depends, Response
-from typing import Any, Literal, Dict, Optional
+from typing import Any, Literal, Dict, Optional, Set
 import requests
 from pydantic import BaseModel, Field, field_validator, model_validator
 from fastapi.responses import JSONResponse
@@ -63,11 +63,27 @@ class SearchDocumentosRequest(BaseModel):
             raise ValueError("campo_anomes é obrigatório")
         return v
 
-    @model_validator(mode="after")
-    def _precisa_ao_menos_um_anomes(self):
-        if not self.anomes and not self.anomes_in:
-            raise ValueError("Envie 'anomes' ou 'anomes_in'.")
-        return self
+    # >>> NOVO: trata vazio como None
+    @field_validator("anomes", mode="before")
+    @classmethod
+    def _blank_to_none(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        return v
+
+    # >>> NOVO: limpa lista vazia / strings vazias
+    @field_validator("anomes_in", mode="before")
+    @classmethod
+    def _normalize_anomes_in(cls, v):
+        if v is None or v == "":
+            return None
+        if isinstance(v, list):
+            cleaned = [str(x).strip() for x in v if str(x).strip()]
+            return cleaned or None
+        s = str(v).strip()
+        return [s] if s else None
 
 class BuscarHolerite(BaseModel):
     cpf: str = Field(..., min_length=11, max_length=14, description="CPF sem formatação, 11 dígitos")
@@ -90,34 +106,6 @@ class UploadBase64Payload(BaseModel):
     documento_nome: str
     documento_base64: str
     campos: List[CampoConsulta]
-
-def _split_competencia(raw: str) -> tuple[int, str]:
-    """
-    Aceita formatos: 'YYYYMM', 'YYYY-MM', 'YYYY-MM-DD'
-    Retorna: (ano:int, mes:'MM')
-    """
-    s = str(raw).strip()
-    if "-" in s:
-        # pega até 'YYYY-MM'
-        partes = s.split("-")
-        if len(partes) >= 2:
-            ano = int(partes[0])
-            mes = partes[1][:2].zfill(2)
-            return ano, mes
-        # fallback
-        s = "".join(partes)
-    # formatos compactos
-    if len(s) >= 6:
-        ano = int(s[:4])
-        mes = s[4:6]
-        return ano, mes
-    raise ValueError(f"Formato de competência inválido: {raw}")
-
-def _headers(auth_key: str) -> Dict[str, str]:
-    return {
-        "Authorization": auth_key,
-        "Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-1",
-    }
 
 def _normaliza_anomes(valor: str) -> str | None:
     v = (valor or "").strip()
@@ -149,6 +137,120 @@ def _flatten_attributes(document: Dict[str, Any]) -> Dict[str, Any]:
         if n:
             d[n] = val
     return d
+
+def _split_competencia(raw: str) -> tuple[int, str]:
+    """
+    Aceita formatos: 'YYYYMM', 'YYYY-MM', 'YYYY-MM-DD'
+    Retorna: (ano:int, mes:'MM')
+    """
+    s = str(raw).strip()
+    if "-" in s:
+        # pega até 'YYYY-MM'
+        partes = s.split("-")
+        if len(partes) >= 2:
+            ano = int(partes[0])
+            mes = partes[1][:2].zfill(2)
+            return ano, mes
+        # fallback
+        s = "".join(partes)
+    # formatos compactos
+    if len(s) >= 6:
+        ano = int(s[:4])
+        mes = s[4:6]
+        return ano, mes
+    raise ValueError(f"Formato de competência inválido: {raw}")
+
+def _headers(auth_key: str) -> Dict[str, str]:
+    return {
+        "Authorization": auth_key,
+        "Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-1",
+    }
+
+def _normaliza_anomes(valor: str) -> Optional[str]:
+    v = (valor or "").strip()
+    if not v:
+        return None
+    try:
+        datetime.strptime(v, "%Y-%m")
+        return v
+    except ValueError:
+        pass
+    if len(v) == 6 and v.isdigit():          # YYYYMM
+        return f"{v[:4]}-{v[4:]}"
+    if "/" in v:                              # YYYY/MM ou MM/YYYY
+        a, b = v.split("/", 1)
+        if len(a) == 4 and b.isdigit():
+            return f"{a}-{b.zfill(2)}"
+        if len(b) == 4 and a.isdigit():
+            return f"{b}-{a.zfill(2)}"
+    if "-" in v:                              # YYYY-M
+        a, b = v.split("-", 1)
+        if len(a) == 4 and b.isdigit():
+            return f"{a}-{b.zfill(2)}"
+    return None
+
+def _flatten_attributes(document: Dict[str, Any]) -> Dict[str, Any]:
+    d = dict(document)
+    for a in (d.pop("attributes", []) or []):
+        n, val = a.get("name"), a.get("value")
+        if n:
+            d[n] = val
+    return d
+
+# >>> NOVO: converte "YYYY-MM" em {"ano": YYYY, "mes": MM}
+def _to_ano_mes(yyyymm: str) -> Dict[str, int]:
+    ano_str, mes_str = yyyymm.split("-", 1)
+    return {"ano": int(ano_str), "mes": int(mes_str)}
+
+def _coleta_anomes_via_search(
+    headers: Dict[str, str],
+    id_template: int | str,
+    nomes_campos: List[str],
+    lista_cp: List[str],
+    campo_anomes: str,
+    max_pages: int = 10
+) -> List[str]:
+    """
+    Fallback quando /documents/filter falha:
+    Consulta /documents/search paginando e extrai valores únicos do campo_anomes.
+    Retorna normalizado no formato "YYYY-MM".
+    """
+    meses: Set[str] = set()
+    pagina = 1
+    total_paginas = 1  # assume 1 até ler o retorno
+
+    while pagina <= total_paginas and pagina <= max_pages:
+        form = [("id_tipo", str(id_template))]
+        form += [("cp[]", v) for v in lista_cp]  # aqui só tipodedoc/matricula terão valor
+        form += [
+            ("ordem", "no_ordem"),
+            ("dt_criacao", ""),
+            ("pagina", str(pagina)),
+            ("colecao", "S"),
+        ]
+
+        r = requests.post(f"{BASE_URL}/documents/search", data=form, headers=headers, timeout=60)
+        r.raise_for_status()
+        data = r.json() or {}
+
+        docs = [_flatten_attributes(doc) for doc in (data.get("documents") or [])]
+        for d in docs:
+            bruto = str(d.get(campo_anomes, "")).strip()
+            n = _normaliza_anomes(bruto)
+            if n:
+                meses.add(n)
+
+        vars_ = data.get("variables") or {}
+        try:
+            total_paginas = int(vars_.get("totalpaginas", total_paginas))
+        except Exception:
+            total_paginas = 1
+
+        pagina += 1
+
+    return sorted(meses, reverse=True)
+
+
 BASE_URL = "http://ged.byebyepaper.com.br:9090/idocs_bbpaper/api/v1"
 
 def login(conta: str, usuario: str, senha: str) -> str:
@@ -383,7 +485,237 @@ def upload_documento_base64(payload: UploadBase64Payload):
 #         "documentos": docs_filtrados
 #     }
 
+# ===========================================================================================================
+# @router.post("/documents/search")
+# def buscar_search_documentos(payload: SearchDocumentosRequest):
+#     # 1) Autentica
+#     try:
+#         auth_key = login(
+#             conta=settings.GED_CONTA, usuario=settings.GED_USUARIO, senha=settings.GED_SENHA
+#         )
+#     except Exception as e:
+#         raise HTTPException(502, f"Falha na autenticação no GED: {e}")
 
+#     headers = _headers(auth_key)
+
+#     # 2) Campos do template
+#     r_fields = requests.post(
+#         f"{BASE_URL}/templates/getfields",
+#         data={"id_template": payload.id_template},
+#         headers=headers,
+#         timeout=30,
+#     )
+#     r_fields.raise_for_status()
+#     nomes_campos = [f.get("nomecampo") for f in (r_fields.json() or {}).get("fields", []) if f.get("nomecampo")]
+
+#     if not nomes_campos:
+#         raise HTTPException(400, "Template sem campos ou inválido")
+#     if payload.campo_anomes not in nomes_campos:
+#         raise HTTPException(400, f"Campo '{payload.campo_anomes}' não existe no template")
+
+#     # 3) cp[] na ordem do template (sem injetar anomes)
+#     lista_cp = ["" for _ in nomes_campos]
+#     for item in payload.cp:
+#         if item.nome not in nomes_campos:
+#             raise HTTPException(400, f"Campo '{item.nome}' não existe no template")
+#         lista_cp[nomes_campos.index(item.nome)] = item.valor
+
+#     # 4) Monta conjunto de meses-alvo (YYYY-MM)
+#     alvo: set[str] = set()
+#     if payload.anomes:
+#         n = _normaliza_anomes(payload.anomes)
+#         if not n:
+#             raise HTTPException(400, "anomes inválido. Use 'YYYY-MM', 'YYYYMM', 'YYYY/MM' ou 'MM/YYYY'.")
+#         alvo.add(n)
+#     if payload.anomes_in:
+#         for val in payload.anomes_in:
+#             n = _normaliza_anomes(val)
+#             if not n:
+#                 raise HTTPException(400, f"Valor inválido em anomes_in: '{val}'")
+#             alvo.add(n)
+
+#     if not alvo:
+#         raise HTTPException(400, "Nenhum 'anomes' válido após normalização.")
+
+#     # 5) Payload mínimo do GED
+#     form = [("id_tipo", str(payload.id_template))]
+#     form += [("cp[]", v) for v in lista_cp]
+#     form += [
+#         ("ordem", "no_ordem"),
+#         ("dt_criacao", ""),
+#         ("pagina", "1"),
+#         ("colecao", "S"),
+#     ]
+
+#     # 6) Consulta GED
+#     try:
+#         r = requests.post(f"{BASE_URL}/documents/search", data=form, headers=headers, timeout=60)
+#         r.raise_for_status()
+#     except requests.HTTPError:
+#         try:
+#             raise HTTPException(r.status_code, f"GED erro: {r.json()}")
+#         except Exception:
+#             raise HTTPException(r.status_code, f"GED erro: {r.text}")
+#     except requests.RequestException as e:
+#         raise HTTPException(502, f"Falha ao consultar GED: {e}")
+
+#     data = r.json() or {}
+#     if data.get("error"):
+#         raise HTTPException(500, f"GED erro: {data.get('message')}")
+
+#     # 7) Flatten + filtro por conjunto de meses
+#     documentos_total = [_flatten_attributes(doc) for doc in (data.get("documents") or [])]
+
+#     filtrados: List[Dict[str, Any]] = []
+#     for d in documentos_total:
+#         bruto = str(d.get(payload.campo_anomes, "")).strip()
+#         if len(bruto) == 6 and bruto.isdigit():
+#             bruto = f"{bruto[:4]}-{bruto[4:]}"
+#         try:
+#             datetime.strptime(bruto, "%Y-%m")
+#         except ValueError:
+#             continue
+#         if bruto in alvo:
+#             d["_norm_anomes"] = bruto
+#             filtrados.append(d)
+
+#     filtrados.sort(key=lambda x: x["_norm_anomes"], reverse=True)
+
+#     # 8) Retorno compatível (lista com todos os meses requisitados)
+#     return {
+#         "total_bruto": len(documentos_total),
+#         "ultimos_6_meses": sorted(alvo, reverse=True),  # mantém a chave p/ não quebrar o front
+#         "total_encontrado": len(filtrados),
+#         "documentos": filtrados,
+#     }
+# # ********************************************
+# @router.post("/documents/holerite/buscar")
+# def buscar_holerite(
+#     payload: "BuscarHolerite",
+#     db: Session = Depends(get_db),
+# ):
+#     cpf = (payload.cpf or "").strip()
+#     matricula = (payload.matricula or "").strip()
+#     competencia = (getattr(payload, "competencia", None) or "").strip()
+
+#     # =========================
+#     # 1) Sem competência: só lista se existir ao menos 1 evento (cpf+matr)
+#     # =========================
+#     if not competencia:
+#         sql_count_evt = text("""
+#             SELECT COUNT(*)::int
+#             FROM tb_holerite_eventos e
+#             WHERE TRIM(e.cpf::text)      = TRIM(:cpf)
+#               AND TRIM(e.matricula::text) = TRIM(:matricula)
+#         """)
+#         total_evt = db.execute(sql_count_evt, {"cpf": cpf, "matricula": matricula}).scalar() or 0
+#         if total_evt == 0:
+#             raise HTTPException(
+#                 status_code=404,
+#                 detail="Nenhum evento encontrado para os critérios informados (cpf/matricula)."
+#             )
+
+#         # Lista somente competências presentes em eventos (normaliza formatos)
+#         sql_lista_comp = text("""
+#             WITH comps AS (
+#               SELECT DISTINCT e.competencia
+#               FROM tb_holerite_eventos e
+#               WHERE TRIM(e.cpf::text)       = TRIM(:cpf)
+#                 AND TRIM(e.matricula::text) = TRIM(:matricula)
+#             )
+#             SELECT
+#               CASE
+#                 WHEN competencia ~ '^[0-9]{4}-[0-9]{2}$' THEN SUBSTRING(competencia, 1, 4)
+#                 WHEN competencia ~ '^[0-9]{6}$'          THEN SUBSTRING(competencia, 1, 4)
+#                 ELSE NULL
+#               END::int AS ano,
+#               CASE
+#                 WHEN competencia ~ '^[0-9]{4}-[0-9]{2}$' THEN SUBSTRING(competencia, 6, 2)
+#                 WHEN competencia ~ '^[0-9]{6}$'          THEN SUBSTRING(competencia, 5, 2)
+#                 ELSE NULL
+#               END::int AS mes
+#             FROM comps
+#             WHERE competencia ~ '^[0-9]{4}-[0-9]{2}$' OR competencia ~ '^[0-9]{6}$'
+#             ORDER BY ano DESC, mes DESC
+#         """)
+#         rows = db.execute(sql_lista_comp, {"cpf": cpf, "matricula": matricula}).fetchall()
+#         competencias = [{"ano": r[0], "mes": r[1]} for r in rows if r[0] is not None and r[1] is not None]
+#         return {"competencias": competencias}
+
+#     # =========================
+#     # 2) Com competência: eventos OBRIGATÓRIOS
+#     # =========================
+#     params_base = {"cpf": cpf, "matricula": matricula, "competencia": competencia}
+
+#     # filtro de competencia normalizado (YYYYMM/YYY-MM)
+#     filtro_comp = """
+#       regexp_replace(TRIM(x.competencia), '[^0-9]', '', 'g') =
+#       regexp_replace(TRIM(:competencia),  '[^0-9]', '', 'g')
+#     """
+
+#     # Pré-checagem: deve existir AO MENOS 1 evento
+#     sql_has_evt = text(f"""
+#         SELECT EXISTS(
+#             SELECT 1
+#             FROM tb_holerite_eventos x
+#             WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
+#               AND TRIM(x.matricula::text) = TRIM(:matricula)
+#               AND {filtro_comp}
+#         ) AS has_evt
+#     """)
+#     has_evt = bool(db.execute(sql_has_evt, params_base).scalar())
+#     if not has_evt:
+#         raise HTTPException(
+#             status_code=404,
+#             detail="Nenhum evento de holerite encontrado para os critérios informados."
+#         )
+
+#     # Eventos (garantidos)
+#     sql_eventos = text(f"""
+#         SELECT *
+#         FROM tb_holerite_eventos x
+#         WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
+#           AND TRIM(x.matricula::text) = TRIM(:matricula)
+#           AND {filtro_comp}
+#         ORDER BY evento
+#     """)
+#     evt_res = db.execute(sql_eventos, params_base)
+#     eventos = [dict(zip(evt_res.keys(), row)) for row in evt_res.fetchall()]
+
+#     # Cabeçalho (opcional)
+#     sql_cabecalho = text(f"""
+#         SELECT *
+#         FROM tb_holerite_cabecalhos x
+#         WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
+#           AND TRIM(x.matricula::text) = TRIM(:matricula)
+#           AND {filtro_comp}
+#         LIMIT 1
+#     """)
+#     cab_res = db.execute(sql_cabecalho, params_base)
+#     cab_row = cab_res.first()
+#     cabecalho = dict(zip(cab_res.keys(), cab_row)) if cab_row else None
+
+#     # Rodapé (opcional)
+#     sql_rodape = text(f"""
+#         SELECT *
+#         FROM tb_holerite_rodapes x
+#         WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
+#           AND TRIM(x.matricula::text) = TRIM(:matricula)
+#           AND {filtro_comp}
+#         LIMIT 1
+#     """)
+#     rod_res = db.execute(sql_rodape, params_base)
+#     rod_row = rod_res.first()
+#     rodape = dict(zip(rod_res.keys(), rod_row)) if rod_row else None
+
+#     return {
+#         "competencia_utilizada": competencia,
+#         "cabecalho": cabecalho,
+#         "eventos": eventos,   # sempre >= 1
+#         "rodape": rodape
+#     }
+
+# ===========================================================================================================
 @router.post("/documents/search")
 def buscar_search_documentos(payload: SearchDocumentosRequest):
     # 1) Autentica
@@ -411,15 +743,84 @@ def buscar_search_documentos(payload: SearchDocumentosRequest):
     if payload.campo_anomes not in nomes_campos:
         raise HTTPException(400, f"Campo '{payload.campo_anomes}' não existe no template")
 
-    # 3) cp[] na ordem do template (sem injetar anomes)
+    # 3) cp[] na ordem do template
     lista_cp = ["" for _ in nomes_campos]
     for item in payload.cp:
         if item.nome not in nomes_campos:
             raise HTTPException(400, f"Campo '{item.nome}' não existe no template")
         lista_cp[nomes_campos.index(item.nome)] = item.valor
 
-    # 4) Monta conjunto de meses-alvo (YYYY-MM)
-    alvo: set[str] = set()
+    # ========= MODO LISTA DE MESES: anomes/anomes_in ausentes (ou vazios) =========
+    if not payload.anomes and not payload.anomes_in:
+        # Garantir que vieram tipodedoc e matricula
+        try:
+            tipodedoc_idx = nomes_campos.index("tipodedoc")
+            tipodedoc_val = (lista_cp[tipodedoc_idx] or "").strip()
+        except ValueError:
+            raise HTTPException(400, "Campo 'tipodedoc' não existe no template")
+        try:
+            matricula_idx = nomes_campos.index("matricula")
+            matricula_val = (lista_cp[matricula_idx] or "").strip()
+        except ValueError:
+            raise HTTPException(400, "Campo 'matricula' não existe no template")
+
+        if not tipodedoc_val or not matricula_val:
+            raise HTTPException(400, "Para listar anomes, informe 'tipodedoc' e 'matricula' em cp[].")
+
+        # 3A) Tenta documents/filter primeiro
+        form = [
+            ("id_tipo", str(payload.id_template)),
+            ("filtro", payload.campo_anomes),
+            ("filtro1", "tipodedoc"),
+            ("filtro1_valor", tipodedoc_val),
+            ("filtro2", "matricula"),
+            ("filtro2_valor", matricula_val),
+        ]
+        try:
+            rf = requests.post(f"{BASE_URL}/documents/filter", data=form, headers=headers, timeout=60)
+            rf.raise_for_status()
+            fdata = rf.json() or {}
+            if fdata.get("error"):
+                raise RuntimeError(f"GED error: {fdata.get('message')}")
+            grupos = fdata.get("groups") or []
+
+            # >>> O QUE MUDOU: montar [{"ano":Y,"mes":M}, ...] a partir do retorno
+            meses_set: Set[str] = set()
+            for g in grupos:
+                bruto = str(g.get(payload.campo_anomes, "")).strip()
+                n = _normaliza_anomes(bruto)
+                if n:
+                    meses_set.add(n)
+
+            if meses_set:
+                meses_sorted_objs = sorted(
+                    (_to_ano_mes(m) for m in meses_set),
+                    key=lambda x: (x["ano"], x["mes"]),
+                    reverse=True
+                )
+                return {"anomes": meses_sorted_objs}
+
+            # se não retornou grupos válidos, usa fallback
+        except (requests.HTTPError, requests.RequestException, RuntimeError):
+            # 3B) Fallback robusto via documents/search (coleta meses "YYYY-MM")
+            meses_norm = _coleta_anomes_via_search(
+                headers=headers,
+                id_template=payload.id_template,
+                nomes_campos=nomes_campos,
+                lista_cp=lista_cp,
+                campo_anomes=payload.campo_anomes,
+            )
+            if meses_norm:
+                meses_sorted_objs = sorted(
+                    (_to_ano_mes(m) for m in meses_norm),
+                    key=lambda x: (x["ano"], x["mes"]),
+                    reverse=True
+                )
+                return {"anomes": meses_sorted_objs}
+            raise HTTPException(404, "Nenhum mês disponível para tipodedoc/matricula informados.")
+
+    # ========= MODO BUSCA: anomes/anomes_in presentes =========
+    alvo: Set[str] = set()
     if payload.anomes:
         n = _normaliza_anomes(payload.anomes)
         if not n:
@@ -432,10 +833,6 @@ def buscar_search_documentos(payload: SearchDocumentosRequest):
                 raise HTTPException(400, f"Valor inválido em anomes_in: '{val}'")
             alvo.add(n)
 
-    if not alvo:
-        raise HTTPException(400, "Nenhum 'anomes' válido após normalização.")
-
-    # 5) Payload mínimo do GED
     form = [("id_tipo", str(payload.id_template))]
     form += [("cp[]", v) for v in lista_cp]
     form += [
@@ -445,7 +842,6 @@ def buscar_search_documentos(payload: SearchDocumentosRequest):
         ("colecao", "S"),
     ]
 
-    # 6) Consulta GED
     try:
         r = requests.post(f"{BASE_URL}/documents/search", data=form, headers=headers, timeout=60)
         r.raise_for_status()
@@ -455,163 +851,34 @@ def buscar_search_documentos(payload: SearchDocumentosRequest):
         except Exception:
             raise HTTPException(r.status_code, f"GED erro: {r.text}")
     except requests.RequestException as e:
-        raise HTTPException(502, f"Falha ao consultar GED: {e}")
+        raise HTTPException(502, f"Falha ao consultar GED (search): {e}")
 
     data = r.json() or {}
     if data.get("error"):
-        raise HTTPException(500, f"GED erro: {data.get('message')}")
+        raise HTTPException(500, f"GED erro (search): {data.get('message')}")
 
-    # 7) Flatten + filtro por conjunto de meses
     documentos_total = [_flatten_attributes(doc) for doc in (data.get("documents") or [])]
 
     filtrados: List[Dict[str, Any]] = []
     for d in documentos_total:
         bruto = str(d.get(payload.campo_anomes, "")).strip()
-        if len(bruto) == 6 and bruto.isdigit():
-            bruto = f"{bruto[:4]}-{bruto[4:]}"
-        try:
-            datetime.strptime(bruto, "%Y-%m")
-        except ValueError:
-            continue
-        if bruto in alvo:
-            d["_norm_anomes"] = bruto
+        n = _normaliza_anomes(bruto)
+        if n and n in alvo:
+            d["_norm_anomes"] = n
             filtrados.append(d)
+
+    if not filtrados:
+        raise HTTPException(404, "Nenhum documento encontrado para os meses informados.")
 
     filtrados.sort(key=lambda x: x["_norm_anomes"], reverse=True)
 
-    # 8) Retorno compatível (lista com todos os meses requisitados)
     return {
         "total_bruto": len(documentos_total),
-        "ultimos_6_meses": sorted(alvo, reverse=True),  # mantém a chave p/ não quebrar o front
+        "meses_solicitados": sorted(alvo, reverse=True),
         "total_encontrado": len(filtrados),
         "documentos": filtrados,
     }
-# ********************************************
-@router.post("/documents/holerite/buscar")
-def buscar_holerite(
-    payload: "BuscarHolerite",
-    db: Session = Depends(get_db),
-):
-    cpf = (payload.cpf or "").strip()
-    matricula = (payload.matricula or "").strip()
-    competencia = (getattr(payload, "competencia", None) or "").strip()
-
-    # =========================
-    # 1) Sem competência: só lista se existir ao menos 1 evento (cpf+matr)
-    # =========================
-    if not competencia:
-        sql_count_evt = text("""
-            SELECT COUNT(*)::int
-            FROM tb_holerite_eventos e
-            WHERE TRIM(e.cpf::text)      = TRIM(:cpf)
-              AND TRIM(e.matricula::text) = TRIM(:matricula)
-        """)
-        total_evt = db.execute(sql_count_evt, {"cpf": cpf, "matricula": matricula}).scalar() or 0
-        if total_evt == 0:
-            raise HTTPException(
-                status_code=404,
-                detail="Nenhum evento encontrado para os critérios informados (cpf/matricula)."
-            )
-
-        # Lista somente competências presentes em eventos (normaliza formatos)
-        sql_lista_comp = text("""
-            WITH comps AS (
-              SELECT DISTINCT e.competencia
-              FROM tb_holerite_eventos e
-              WHERE TRIM(e.cpf::text)       = TRIM(:cpf)
-                AND TRIM(e.matricula::text) = TRIM(:matricula)
-            )
-            SELECT
-              CASE
-                WHEN competencia ~ '^[0-9]{4}-[0-9]{2}$' THEN SUBSTRING(competencia, 1, 4)
-                WHEN competencia ~ '^[0-9]{6}$'          THEN SUBSTRING(competencia, 1, 4)
-                ELSE NULL
-              END::int AS ano,
-              CASE
-                WHEN competencia ~ '^[0-9]{4}-[0-9]{2}$' THEN SUBSTRING(competencia, 6, 2)
-                WHEN competencia ~ '^[0-9]{6}$'          THEN SUBSTRING(competencia, 5, 2)
-                ELSE NULL
-              END::int AS mes
-            FROM comps
-            WHERE competencia ~ '^[0-9]{4}-[0-9]{2}$' OR competencia ~ '^[0-9]{6}$'
-            ORDER BY ano DESC, mes DESC
-        """)
-        rows = db.execute(sql_lista_comp, {"cpf": cpf, "matricula": matricula}).fetchall()
-        competencias = [{"ano": r[0], "mes": r[1]} for r in rows if r[0] is not None and r[1] is not None]
-        return {"competencias": competencias}
-
-    # =========================
-    # 2) Com competência: eventos OBRIGATÓRIOS
-    # =========================
-    params_base = {"cpf": cpf, "matricula": matricula, "competencia": competencia}
-
-    # filtro de competencia normalizado (YYYYMM/YYY-MM)
-    filtro_comp = """
-      regexp_replace(TRIM(x.competencia), '[^0-9]', '', 'g') =
-      regexp_replace(TRIM(:competencia),  '[^0-9]', '', 'g')
-    """
-
-    # Pré-checagem: deve existir AO MENOS 1 evento
-    sql_has_evt = text(f"""
-        SELECT EXISTS(
-            SELECT 1
-            FROM tb_holerite_eventos x
-            WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
-              AND TRIM(x.matricula::text) = TRIM(:matricula)
-              AND {filtro_comp}
-        ) AS has_evt
-    """)
-    has_evt = bool(db.execute(sql_has_evt, params_base).scalar())
-    if not has_evt:
-        raise HTTPException(
-            status_code=404,
-            detail="Nenhum evento de holerite encontrado para os critérios informados."
-        )
-
-    # Eventos (garantidos)
-    sql_eventos = text(f"""
-        SELECT *
-        FROM tb_holerite_eventos x
-        WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
-          AND TRIM(x.matricula::text) = TRIM(:matricula)
-          AND {filtro_comp}
-        ORDER BY evento
-    """)
-    evt_res = db.execute(sql_eventos, params_base)
-    eventos = [dict(zip(evt_res.keys(), row)) for row in evt_res.fetchall()]
-
-    # Cabeçalho (opcional)
-    sql_cabecalho = text(f"""
-        SELECT *
-        FROM tb_holerite_cabecalhos x
-        WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
-          AND TRIM(x.matricula::text) = TRIM(:matricula)
-          AND {filtro_comp}
-        LIMIT 1
-    """)
-    cab_res = db.execute(sql_cabecalho, params_base)
-    cab_row = cab_res.first()
-    cabecalho = dict(zip(cab_res.keys(), cab_row)) if cab_row else None
-
-    # Rodapé (opcional)
-    sql_rodape = text(f"""
-        SELECT *
-        FROM tb_holerite_rodapes x
-        WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
-          AND TRIM(x.matricula::text) = TRIM(:matricula)
-          AND {filtro_comp}
-        LIMIT 1
-    """)
-    rod_res = db.execute(sql_rodape, params_base)
-    rod_row = rod_res.first()
-    rodape = dict(zip(rod_res.keys(), rod_row)) if rod_row else None
-
-    return {
-        "competencia_utilizada": competencia,
-        "cabecalho": cabecalho,
-        "eventos": eventos,   # sempre >= 1
-        "rodape": rodape
-    }
+# ===========================================================================================================
 
 # @router.post("/documents/holerite/montar")
 # def montar_holerite(
