@@ -1,23 +1,16 @@
-from urllib import response
 from fastapi import APIRouter, HTTPException, Form, Depends, Response
-from typing import Any, Literal, Dict, Optional, Set
+from typing import Any, Dict, Optional, Set
 import requests
-from pydantic import BaseModel, Field, field_validator, model_validator
-from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
 from babel.dates import format_date
-from dateutil.relativedelta import relativedelta
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from app.database.connection import get_db
 from config.settings import settings
 from typing import List
-from io import BytesIO
-import io
-import re
 import base64
 from fpdf import FPDF
-# from PIL import Image
 
 router = APIRouter()
 
@@ -52,8 +45,8 @@ class SearchDocumentosRequest(BaseModel):
     id_template: int | str
     cp: List[CampoValor] = Field(default_factory=list)
     campo_anomes: str
-    anomes: Optional[str] = None           # ex.: "2025-05", "202505", "2025/05", "05/2025"
-    anomes_in: Optional[List[str]] = None  # ex.: ["2025-05", "2025-02"]
+    anomes: Optional[str] = None
+    anomes_in: Optional[List[str]] = None
 
     @field_validator("campo_anomes")
     @classmethod
@@ -63,7 +56,6 @@ class SearchDocumentosRequest(BaseModel):
             raise ValueError("campo_anomes é obrigatório")
         return v
 
-    # >>> NOVO: trata vazio como None
     @field_validator("anomes", mode="before")
     @classmethod
     def _blank_to_none(cls, v):
@@ -73,7 +65,6 @@ class SearchDocumentosRequest(BaseModel):
             return None
         return v
 
-    # >>> NOVO: limpa lista vazia / strings vazias
     @field_validator("anomes_in", mode="before")
     @classmethod
     def _normalize_anomes_in(cls, v):
@@ -116,15 +107,15 @@ def _normaliza_anomes(valor: str) -> str | None:
         return v
     except ValueError:
         pass
-    if len(v) == 6 and v.isdigit():          # YYYYMM
+    if len(v) == 6 and v.isdigit():
         return f"{v[:4]}-{v[4:]}"
-    if "/" in v:                              # YYYY/MM ou MM/YYYY
+    if "/" in v:
         a, b = v.split("/", 1)
         if len(a) == 4 and b.isdigit():
             return f"{a}-{b.zfill(2)}"
         if len(b) == 4 and a.isdigit():
             return f"{b}-{a.zfill(2)}"
-    if "-" in v:                              # YYYY-M
+    if "-" in v:
         a, b = v.split("-", 1)
         if len(a) == 4 and b.isdigit():
             return f"{a}-{b.zfill(2)}"
@@ -145,15 +136,12 @@ def _split_competencia(raw: str) -> tuple[int, str]:
     """
     s = str(raw).strip()
     if "-" in s:
-        # pega até 'YYYY-MM'
         partes = s.split("-")
         if len(partes) >= 2:
             ano = int(partes[0])
             mes = partes[1][:2].zfill(2)
             return ano, mes
-        # fallback
         s = "".join(partes)
-    # formatos compactos
     if len(s) >= 6:
         ano = int(s[:4])
         mes = s[4:6]
@@ -175,15 +163,15 @@ def _normaliza_anomes(valor: str) -> Optional[str]:
         return v
     except ValueError:
         pass
-    if len(v) == 6 and v.isdigit():          # YYYYMM
+    if len(v) == 6 and v.isdigit():
         return f"{v[:4]}-{v[4:]}"
-    if "/" in v:                              # YYYY/MM ou MM/YYYY
+    if "/" in v:
         a, b = v.split("/", 1)
         if len(a) == 4 and b.isdigit():
             return f"{a}-{b.zfill(2)}"
         if len(b) == 4 and a.isdigit():
             return f"{b}-{a.zfill(2)}"
-    if "-" in v:                              # YYYY-M
+    if "-" in v:
         a, b = v.split("-", 1)
         if len(a) == 4 and b.isdigit():
             return f"{a}-{b.zfill(2)}"
@@ -197,7 +185,6 @@ def _flatten_attributes(document: Dict[str, Any]) -> Dict[str, Any]:
             d[n] = val
     return d
 
-# >>> NOVO: converte "YYYY-MM" em {"ano": YYYY, "mes": MM}
 def _to_ano_mes(yyyymm: str) -> Dict[str, int]:
     ano_str, mes_str = yyyymm.split("-", 1)
     return {"ano": int(ano_str), "mes": int(mes_str)}
@@ -221,7 +208,7 @@ def _coleta_anomes_via_search(
 
     while pagina <= total_paginas and pagina <= max_pages:
         form = [("id_tipo", str(id_template))]
-        form += [("cp[]", v) for v in lista_cp]  # aqui só tipodedoc/matricula terão valor
+        form += [("cp[]", v) for v in lista_cp]
         form += [
             ("ordem", "no_ordem"),
             ("dt_criacao", ""),
@@ -295,8 +282,6 @@ def listar_templates() -> Any:
 
     if data.get("error"):
         raise HTTPException(status_code=400, detail="Erro na resposta da API GED")
-
-    # Retorna diretamente o conteúdo da chave "templates"
     return data.get("templates", [])
 
 @router.post("/searchdocuments/templateFields")
@@ -327,7 +312,6 @@ def get_template_fields(id_template: int = Form(...)):
 
 @router.post("/documents/upload_base64")
 def upload_documento_base64(payload: UploadBase64Payload):
-    # 1. Login primeiro
     auth_key = login(
         conta=settings.GED_CONTA,
         usuario=settings.GED_USUARIO,
@@ -339,7 +323,6 @@ def upload_documento_base64(payload: UploadBase64Payload):
         "Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-1"
     }
 
-    # 2. Buscar campos do template
     response_fields = requests.post(
         f"{BASE_URL}/templates/getfields",
         data={"id_template": payload.id_tipo},
@@ -352,14 +335,12 @@ def upload_documento_base64(payload: UploadBase64Payload):
     nomes_campos = [campo["nomecampo"] for campo in campos_template]
     lista_cp = ["" for _ in nomes_campos]
 
-    # 3. Preencher cp[] na ordem correta
     for campo in payload.campos:
         if campo.nome not in nomes_campos:
             raise HTTPException(status_code=400, detail=f"Campo '{campo.nome}' não encontrado no template")
         idx = nomes_campos.index(campo.nome)
         lista_cp[idx] = campo.valor
 
-    # 4. Montar payload
     data = {
         "id_tipo": str(payload.id_tipo),
         "formato": payload.formato,
@@ -369,7 +350,6 @@ def upload_documento_base64(payload: UploadBase64Payload):
     for valor in lista_cp:
         data.setdefault("cp[]", []).append(valor)
 
-    # 5. Enviar para GED
     response = requests.post(
         f"{BASE_URL}/documents/uploadbase64",
         headers=headers,
@@ -390,9 +370,6 @@ def buscar_holerite(
     matricula = (payload.matricula or "").strip()
     competencia = (getattr(payload, "competencia", None) or "").strip()
 
-    # =========================
-    # 1) Sem competência: listar APENAS competências com EVENTO + CABEÇALHO + RODAPÉ no mesmo LOTE
-    # =========================
     if not competencia:
         sql_lista_comp = text("""
             WITH norm_evt AS (
@@ -447,9 +424,6 @@ def buscar_holerite(
 
         return {"competencias": competencias}
 
-    # =========================
-    # 2) Com competência: exige EVENTOS + CABEÇALHO + RODAPÉ, alinhados (mesmo lote)
-    # =========================
     params_base = {"cpf": cpf, "matricula": matricula, "competencia": competencia}
 
     filtro_comp = """
@@ -457,7 +431,6 @@ def buscar_holerite(
       regexp_replace(TRIM(:competencia),  '[^0-9]', '', 'g')
     """
 
-    # Eventos existem?
     sql_has_evt = text(f"""
         SELECT EXISTS(
             SELECT 1
@@ -474,7 +447,6 @@ def buscar_holerite(
             detail="Nenhum evento de holerite encontrado para os critérios informados."
         )
 
-    # Carrega eventos (todos da competência) e extrai lotes
     sql_eventos = text(f"""
         SELECT *
         FROM tb_holerite_eventos x
@@ -499,7 +471,6 @@ def buscar_holerite(
         if lote is not None:
             params_try["lote"] = lote
 
-        # Cabeçalho
         if lote is not None:
             sql_cab = text(f"""
                 SELECT *
@@ -525,7 +496,6 @@ def buscar_holerite(
         cab_row = cab_res.first()
         cab_tmp = dict(zip(cab_res.keys(), cab_row)) if cab_row else None
 
-        # Rodapé
         if lote is not None:
             sql_rod = text(f"""
                 SELECT *
@@ -567,7 +537,6 @@ def buscar_holerite(
     if not rodape:
         raise HTTPException(status_code=404, detail="Rodapé ausente para a competência/lote informados.")
 
-    # (Opcional) filtrar eventos para o mesmo lote escolhido
     if lote_escolhido is not None:
         eventos = [e for e in eventos if e.get("lote") == lote_escolhido]
         if not eventos:
@@ -586,7 +555,6 @@ def buscar_holerite(
 
 @router.post("/documents/search")
 def buscar_search_documentos(payload: SearchDocumentosRequest):
-    # 1) Autentica
     try:
         auth_key = login(
             conta=settings.GED_CONTA, usuario=settings.GED_USUARIO, senha=settings.GED_SENHA
@@ -596,7 +564,6 @@ def buscar_search_documentos(payload: SearchDocumentosRequest):
 
     headers = _headers(auth_key)
 
-    # 2) Campos do template
     r_fields = requests.post(
         f"{BASE_URL}/templates/getfields",
         data={"id_template": payload.id_template},
@@ -611,16 +578,13 @@ def buscar_search_documentos(payload: SearchDocumentosRequest):
     if payload.campo_anomes not in nomes_campos:
         raise HTTPException(400, f"Campo '{payload.campo_anomes}' não existe no template")
 
-    # 3) cp[] na ordem do template
     lista_cp = ["" for _ in nomes_campos]
     for item in payload.cp:
         if item.nome not in nomes_campos:
             raise HTTPException(400, f"Campo '{item.nome}' não existe no template")
         lista_cp[nomes_campos.index(item.nome)] = item.valor
 
-    # ========= MODO LISTA DE MESES: anomes/anomes_in ausentes (ou vazios) =========
     if not payload.anomes and not payload.anomes_in:
-        # Garantir que vieram tipodedoc e matricula
         try:
             tipodedoc_idx = nomes_campos.index("tipodedoc")
             tipodedoc_val = (lista_cp[tipodedoc_idx] or "").strip()
@@ -635,7 +599,6 @@ def buscar_search_documentos(payload: SearchDocumentosRequest):
         if not tipodedoc_val or not matricula_val:
             raise HTTPException(400, "Para listar anomes, informe 'tipodedoc' e 'matricula' em cp[].")
 
-        # 3A) Tenta documents/filter primeiro
         form = [
             ("id_tipo", str(payload.id_template)),
             ("filtro", payload.campo_anomes),
@@ -652,7 +615,6 @@ def buscar_search_documentos(payload: SearchDocumentosRequest):
                 raise RuntimeError(f"GED error: {fdata.get('message')}")
             grupos = fdata.get("groups") or []
 
-            # >>> O QUE MUDOU: montar [{"ano":Y,"mes":M}, ...] a partir do retorno
             meses_set: Set[str] = set()
             for g in grupos:
                 bruto = str(g.get(payload.campo_anomes, "")).strip()
@@ -668,9 +630,7 @@ def buscar_search_documentos(payload: SearchDocumentosRequest):
                 )
                 return {"anomes": meses_sorted_objs}
 
-            # se não retornou grupos válidos, usa fallback
         except (requests.HTTPError, requests.RequestException, RuntimeError):
-            # 3B) Fallback robusto via documents/search (coleta meses "YYYY-MM")
             meses_norm = _coleta_anomes_via_search(
                 headers=headers,
                 id_template=payload.id_template,
@@ -687,7 +647,6 @@ def buscar_search_documentos(payload: SearchDocumentosRequest):
                 return {"anomes": meses_sorted_objs}
             raise HTTPException(404, "Nenhum mês disponível para tipodedoc/matricula informados.")
 
-    # ========= MODO BUSCA: anomes/anomes_in presentes =========
     alvo: Set[str] = set()
     if payload.anomes:
         n = _normaliza_anomes(payload.anomes)
@@ -751,44 +710,39 @@ def pad_left(valor: str, width: int) -> str:
     return str(valor).strip().zfill(width)
 
 def fmt_num(valor: float) -> str:
-    s = f"{valor:,.2f}"        # "12,345.60"
-    s = s.replace(",", "X").replace(".", ",")  # "12X345,60"
-    return s.replace("X", ".")  # "12.345,60"
+    s = f"{valor:,.2f}"
+    s = s.replace(",", "X").replace(".", ",")
+    return s.replace("X", ".")
 
 def truncate(text: str, max_len: int) -> str:
     text = text or ""
     return text if len(text) <= max_len else text[: max_len - 3] + "..."
 
 def gerar_recibo(cabecalho: dict, eventos: list[dict], rodape: dict, page_number: int = 1) -> bytes:
-    # 1) Padding
+    
     cabecalho["matricula"] = pad_left(cabecalho["matricula"], 6)
     cabecalho["cliente"]   = pad_left(cabecalho["cliente"],   5)
     cabecalho["empresa"]   = pad_left(cabecalho["empresa"],   3)
     cabecalho["filial"]    = pad_left(cabecalho["filial"],    3)
 
-    # 2) Formata datas
     adm = datetime.fromisoformat(cabecalho["admissao"])
     cabecalho["admissao"]   = format_date(adm, "dd/MM/yyyy", locale="pt_BR")
     comp = datetime.strptime(cabecalho["competencia"], "%Y%m")
     cabecalho["competencia"] = format_date(comp, "LLLL/yyyy", locale="pt_BR").capitalize()
 
-    # Truncamento limitado
     empresa_nome = truncate(cabecalho.get("empresa_nome", ""), 50)
     cliente_nome = truncate(cabecalho.get("cliente_nome", ""), 50)
     funcionario  = truncate(cabecalho.get("nome", ""), 30)
     funcao       = truncate(cabecalho.get("funcao_nome", ""), 16)
 
-    # 3) Inicializa PDF
     pdf = FPDF(format='A4', unit='mm')
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
 
-    # — Cabeçalho Superior —
     pdf.set_font("Arial", 'B', 12)
     pdf.cell(0, 6, "Recibo de Pagamento de Salário", ln=0)
     pdf.ln(6)
 
-    # — Empresa e Cliente —
     pdf.set_font("Arial", '', 9)
     pdf.cell(120, 5, f"Empresa: {cabecalho['empresa']} - {cabecalho['filial']} {empresa_nome}", ln=0)
     pdf.cell(0,   5, f"Nº Inscrição: {cabecalho['empresa_cnpj']}", ln=1, align='R')
@@ -796,7 +750,6 @@ def gerar_recibo(cabecalho: dict, eventos: list[dict], rodape: dict, page_number
     pdf.cell(0,   5, f"Nº Inscrição: {cabecalho['cliente_cnpj']}", ln=1, align='R')
     pdf.ln(3)
 
-    # — Campos do Funcionário —
     col_widths = [20, 60, 40, 30, 30]
     headers    = ["Código", "Nome do Funcionário", "Função", "Admissão", "Competência"]
     pdf.set_font("Arial", 'B', 9)
@@ -811,14 +764,12 @@ def gerar_recibo(cabecalho: dict, eventos: list[dict], rodape: dict, page_number
         pdf.cell(w, 6, v)
     pdf.ln(6)
 
-    # — Linha separando cabeçalho de eventos —
     y_sep = pdf.get_y()
     pdf.set_draw_color(0, 0, 0)
     pdf.set_line_width(0.2)
     pdf.line(pdf.l_margin, y_sep, pdf.w - pdf.r_margin, y_sep)
     pdf.ln(3)
 
-    # — Tabela de Eventos com cabeçalhos centralizados nas colunas numéricas —
     evt_headers = ["Cód.", "Descrição", "Referência", "Vencimentos", "Descontos"]
     pdf.set_font("Arial", 'B', 9)
     for i, (w, h) in enumerate(zip(col_widths, evt_headers)):
@@ -826,7 +777,6 @@ def gerar_recibo(cabecalho: dict, eventos: list[dict], rodape: dict, page_number
         pdf.cell(w, 6, h, align=align)
     pdf.ln(6)
 
-    # — Dados de Eventos, truncando e convertendo para maiúsculas —
     y_start = pdf.get_y()
     pdf.set_font("Arial", '', 9)
     for evt in eventos:
@@ -844,7 +794,6 @@ def gerar_recibo(cabecalho: dict, eventos: list[dict], rodape: dict, page_number
         pdf.ln(6)
     y_end = pdf.get_y()
 
-    # — Linhas verticais internas —
     x0 = pdf.l_margin + col_widths[0] + col_widths[1]
     x1 = x0 + col_widths[2]
     x2 = x1 + col_widths[3]
@@ -853,12 +802,10 @@ def gerar_recibo(cabecalho: dict, eventos: list[dict], rodape: dict, page_number
         pdf.line(x, y_start, x, y_end)
     pdf.ln(2)
 
-    # — Linha separando eventos do rodapé —
     y = pdf.get_y()
     pdf.line(pdf.l_margin, y, pdf.w - pdf.r_margin, y)
     pdf.ln(3)
 
-    # — Totais lado a lado —
     usable = pdf.w - pdf.l_margin - pdf.r_margin
     half   = (usable - 10) / 2
     pdf.set_font("Arial", 'B', 9)
@@ -871,17 +818,14 @@ def gerar_recibo(cabecalho: dict, eventos: list[dict], rodape: dict, page_number
     pdf.cell(half, 6, fmt_num(rodape['total_descontos']),    ln=1, align='R')
     pdf.ln(3)
 
-    # — Valor Líquido —
     pdf.set_font("Arial", 'B', 9)
     pdf.cell(0, 6, f"Valor Líquido »» {fmt_num(rodape['valor_liquido'])}", ln=1, align='R')
     pdf.ln(4)
 
-    # — Linha antes do rodapé detalhado —
     y = pdf.get_y()
     pdf.line(pdf.l_margin, y, pdf.w - pdf.r_margin, y)
     pdf.ln(3)
 
-    # — Rodapé Detalhado —
     detalhes = ["Salário Base", "Sal. Contr. INSS", "Base Cálc FGTS",
                "F.G.T.S. do Mês", "Base Cálc IRRF", "DEP SF", "DEP IRF"]
     pdf.set_font("Arial", 'B', 8)
@@ -903,7 +847,6 @@ def gerar_recibo(cabecalho: dict, eventos: list[dict], rodape: dict, page_number
         pdf.cell(28, 6, v)
     pdf.ln(10)
 
-    # — Assinatura e Data —
     pdf.ln(10)
     y_sig = pdf.get_y()
     pdf.set_line_width(0.2)
@@ -922,7 +865,6 @@ def montar_holerite(
 ):
     params = {"matricula": payload.matricula, "competencia": payload.competencia, "lote": payload.lote, "cpf": payload.cpf}
 
-    # Cabeçalho
     sql_cabecalho = text("""
         SELECT empresa, filial, empresa_nome, empresa_cnpj,
                cliente, cliente_nome, cliente_cnpj,
@@ -940,7 +882,6 @@ def montar_holerite(
         raise HTTPException(status_code=404, detail="Cabeçalho não encontrado")
     cabecalho = dict(zip(cab_res.keys(), cab_row))
 
-    # Eventos
     sql_eventos = text("""
         SELECT evento, evento_nome, referencia, valor, tipo
         FROM tb_holerite_eventos
@@ -955,7 +896,6 @@ def montar_holerite(
     if not eventos:
       return Response(status_code=204)
 
-    # Validação de tipo de eventos (V ou D)
     for evt in eventos:
         tipo = evt.get('tipo', '').upper()
         if tipo not in ('V', 'D'):
@@ -991,11 +931,7 @@ def montar_holerite(
         "pdf_base64": pdf_base64
     }
 
-
-
-# ********************************************
-
-@router.post("/searchdocuments/download") #Fazer com que ao baixar o documento ele de um log de quem baixou
+@router.post("/searchdocuments/download")
 def baixar_documento(payload: DownloadDocumentoPayload):
     auth_key = login(
         conta=settings.GED_CONTA,
@@ -1023,9 +959,9 @@ def baixar_documento(payload: DownloadDocumentoPayload):
         raise HTTPException(status_code=response.status_code, detail=f"Erro {response.status_code}: {response.text}")
 
     try:
-        return response.json()  # Se a resposta for JSON com {"base64": "..."}
+        return response.json()
     except ValueError:
         return {
             "erro": False,
-            "base64_raw": response.text  # pode ser o próprio base64 direto
+            "base64_raw": response.text
         }
