@@ -492,100 +492,124 @@ def buscar_holerite(
     payload: "BuscarHolerite",
     db: Session = Depends(get_db),
 ):
-    # Se NÃO vier competência -> listar competências disponíveis (somente ano/mes)
-    if not getattr(payload, "competencia", None):
-        sql_lista_comp = text("""
-            SELECT DISTINCT competencia
-            FROM tb_holerite_cabecalhos
-            WHERE cpf = :cpf AND matricula = :matricula
-            ORDER BY competencia DESC
+    cpf = (payload.cpf or "").strip()
+    matricula = (payload.matricula or "").strip()
+    competencia = (getattr(payload, "competencia", None) or "").strip()
+
+    # =========================
+    # 1) Sem competência: só lista se existir ao menos 1 evento (cpf+matr)
+    # =========================
+    if not competencia:
+        sql_count_evt = text("""
+            SELECT COUNT(*)::int
+            FROM tb_holerite_eventos e
+            WHERE TRIM(e.cpf::text)      = TRIM(:cpf)
+              AND TRIM(e.matricula::text) = TRIM(:matricula)
         """)
-        rows = db.execute(sql_lista_comp, {"cpf": payload.cpf, "matricula": payload.matricula}).fetchall()
-        if not rows:
+        total_evt = db.execute(sql_count_evt, {"cpf": cpf, "matricula": matricula}).scalar() or 0
+        if total_evt == 0:
             raise HTTPException(
                 status_code=404,
-                detail="Nenhuma competência encontrada para os critérios informados (cpf/matricula)."
+                detail="Nenhum evento encontrado para os critérios informados (cpf/matricula)."
             )
 
-        competencias = []
-        for (comp_raw,) in rows:
-            try:
-                ano, mes = _split_competencia(comp_raw)
-                competencias.append({"ano": ano, "mes": mes})
-            except Exception:
-                # ignora formatos inesperados
-                continue
-
-        # garante ordenação (caso algum formato inesperado passe), desc por ano/mes
-        competencias.sort(key=lambda x: (x["ano"], x["mes"]), reverse=True)
-
-        # retorna SOMENTE anos/meses conforme solicitado
+        # Lista somente competências presentes em eventos (normaliza formatos)
+        sql_lista_comp = text("""
+            WITH comps AS (
+              SELECT DISTINCT e.competencia
+              FROM tb_holerite_eventos e
+              WHERE TRIM(e.cpf::text)       = TRIM(:cpf)
+                AND TRIM(e.matricula::text) = TRIM(:matricula)
+            )
+            SELECT
+              CASE
+                WHEN competencia ~ '^[0-9]{4}-[0-9]{2}$' THEN SUBSTRING(competencia, 1, 4)
+                WHEN competencia ~ '^[0-9]{6}$'          THEN SUBSTRING(competencia, 1, 4)
+                ELSE NULL
+              END::int AS ano,
+              CASE
+                WHEN competencia ~ '^[0-9]{4}-[0-9]{2}$' THEN SUBSTRING(competencia, 6, 2)
+                WHEN competencia ~ '^[0-9]{6}$'          THEN SUBSTRING(competencia, 5, 2)
+                ELSE NULL
+              END::int AS mes
+            FROM comps
+            WHERE competencia ~ '^[0-9]{4}-[0-9]{2}$' OR competencia ~ '^[0-9]{6}$'
+            ORDER BY ano DESC, mes DESC
+        """)
+        rows = db.execute(sql_lista_comp, {"cpf": cpf, "matricula": matricula}).fetchall()
+        competencias = [{"ano": r[0], "mes": r[1]} for r in rows if r[0] is not None and r[1] is not None]
         return {"competencias": competencias}
 
-    # Se vier competência -> fluxo original
-    competencia_escolhida = payload.competencia
-    params = {
-        "cpf": payload.cpf,
-        "matricula": payload.matricula,
-        "competencia": competencia_escolhida,
-    }
+    # =========================
+    # 2) Com competência: eventos OBRIGATÓRIOS
+    # =========================
+    params_base = {"cpf": cpf, "matricula": matricula, "competencia": competencia}
 
-    # 1) Cabeçalho
-    sql_cabecalho = text("""
-        SELECT *
-        FROM tb_holerite_cabecalhos
-        WHERE cpf         = :cpf
-          AND matricula   = :matricula
-          AND competencia = :competencia
-    """)
-    cab_res = db.execute(sql_cabecalho, params)
-    cab_row = cab_res.first()
-    if not cab_row:
-        raise HTTPException(
-            status_code=404,
-            detail="Nenhum cabeçalho de holerite encontrado para os critérios informados."
-        )
-    cabecalho = dict(zip(cab_res.keys(), cab_row))
+    # filtro de competencia normalizado (YYYYMM/YYY-MM)
+    filtro_comp = """
+      regexp_replace(TRIM(x.competencia), '[^0-9]', '', 'g') =
+      regexp_replace(TRIM(:competencia),  '[^0-9]', '', 'g')
+    """
 
-    # 2) Eventos
-    sql_eventos = text("""
-        SELECT *
-        FROM tb_holerite_eventos
-        WHERE cpf         = :cpf
-          AND matricula   = :matricula
-          AND competencia = :competencia
-        ORDER BY evento
+    # Pré-checagem: deve existir AO MENOS 1 evento
+    sql_has_evt = text(f"""
+        SELECT EXISTS(
+            SELECT 1
+            FROM tb_holerite_eventos x
+            WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
+              AND TRIM(x.matricula::text) = TRIM(:matricula)
+              AND {filtro_comp}
+        ) AS has_evt
     """)
-    evt_res = db.execute(sql_eventos, params)
-    evt_rows = evt_res.fetchall()
-    if not evt_rows:
+    has_evt = bool(db.execute(sql_has_evt, params_base).scalar())
+    if not has_evt:
         raise HTTPException(
             status_code=404,
             detail="Nenhum evento de holerite encontrado para os critérios informados."
         )
-    eventos = [dict(zip(evt_res.keys(), row)) for row in evt_rows]
 
-    # 3) Rodapé
-    sql_rodape = text("""
+    # Eventos (garantidos)
+    sql_eventos = text(f"""
         SELECT *
-        FROM tb_holerite_rodapes
-        WHERE cpf         = :cpf
-          AND matricula   = :matricula
-          AND competencia = :competencia
+        FROM tb_holerite_eventos x
+        WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
+          AND TRIM(x.matricula::text) = TRIM(:matricula)
+          AND {filtro_comp}
+        ORDER BY evento
     """)
-    rod_res = db.execute(sql_rodape, params)
+    evt_res = db.execute(sql_eventos, params_base)
+    eventos = [dict(zip(evt_res.keys(), row)) for row in evt_res.fetchall()]
+
+    # Cabeçalho (opcional)
+    sql_cabecalho = text(f"""
+        SELECT *
+        FROM tb_holerite_cabecalhos x
+        WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
+          AND TRIM(x.matricula::text) = TRIM(:matricula)
+          AND {filtro_comp}
+        LIMIT 1
+    """)
+    cab_res = db.execute(sql_cabecalho, params_base)
+    cab_row = cab_res.first()
+    cabecalho = dict(zip(cab_res.keys(), cab_row)) if cab_row else None
+
+    # Rodapé (opcional)
+    sql_rodape = text(f"""
+        SELECT *
+        FROM tb_holerite_rodapes x
+        WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
+          AND TRIM(x.matricula::text) = TRIM(:matricula)
+          AND {filtro_comp}
+        LIMIT 1
+    """)
+    rod_res = db.execute(sql_rodape, params_base)
     rod_row = rod_res.first()
-    if not rod_row:
-        raise HTTPException(
-            status_code=404,
-            detail="Nenhum rodapé de holerite encontrado para os critérios informados."
-        )
-    rodape = dict(zip(rod_res.keys(), rod_row))
+    rodape = dict(zip(rod_res.keys(), rod_row)) if rod_row else None
 
     return {
-        "competencia_utilizada": competencia_escolhida,
+        "competencia_utilizada": competencia,
         "cabecalho": cabecalho,
-        "eventos": eventos,
+        "eventos": eventos,   # sempre >= 1
         "rodape": rodape
     }
 
