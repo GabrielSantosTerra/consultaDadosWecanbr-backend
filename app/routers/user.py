@@ -1,16 +1,18 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from app.utils.jwt_handler import decode_token
 from datetime import datetime
 import re
 import os
+from typing import List
 
 from app.utils.password import gerar_hash_senha, verificar_senha
 from app.database.connection import get_db
 from app.models.user import Usuario, Pessoa
 from app.models.blacklist import TokenBlacklist
-from app.schemas.user import CadastroPessoa, UsuarioLogin, PessoaResponse, CadastroColaborador, ColabResponse
+from app.schemas.user import CadastroPessoa, UsuarioLogin, PessoaResponse, DadoItem
 from app.utils.jwt_handler import criar_token, verificar_token, decode_token
 from dotenv import load_dotenv
 
@@ -200,8 +202,47 @@ def login_user(
 
     return response
 
+# @router.get("/user/me", response_model=PessoaResponse)
+# def get_me(request: Request, db: Session = Depends(get_db)):
+#     access_token = request.cookies.get("access_token")
+#     if not access_token:
+#         raise HTTPException(status_code=401, detail="Token de autenticação ausente")
+
+#     payload = verificar_token(access_token)
+#     if not payload:
+#         raise HTTPException(status_code=401, detail="Token inválido")
+
+#     jti = payload.get("jti")
+#     if not jti:
+#         raise HTTPException(status_code=401, detail="Token sem identificador único (jti)")
+
+#     if db.query(TokenBlacklist).filter_by(jti=jti).first():
+#         raise HTTPException(status_code=401, detail="Token expirado ou inválido")
+
+#     pessoa_id = payload.get("id")
+#     pessoa = db.query(Pessoa).filter(Pessoa.id == pessoa_id).first()
+
+#     if not pessoa:
+#         raise HTTPException(status_code=401, detail="Pessoa não encontrada")
+
+#     usuario = db.query(Usuario).filter(Usuario.id_pessoa == pessoa.id).first()
+
+#     if not usuario:
+#         raise HTTPException(status_code=404, detail="Usuário não encontrado")
+
+#     return PessoaResponse(
+#         nome=pessoa.nome,
+#         cpf=pessoa.cpf,
+#         email=usuario.email,
+#         cliente=pessoa.cliente,
+#         centro_de_custo=pessoa.centro_de_custo,
+#         matricula=pessoa.matricula,
+#         gestor=pessoa.gestor
+#     )
+
 @router.get("/user/me", response_model=PessoaResponse)
 def get_me(request: Request, db: Session = Depends(get_db)):
+    # --- autenticação via cookie/jwt (inalterado) ---
     access_token = request.cookies.get("access_token")
     if not access_token:
         raise HTTPException(status_code=401, detail="Token de autenticação ausente")
@@ -219,25 +260,50 @@ def get_me(request: Request, db: Session = Depends(get_db)):
 
     pessoa_id = payload.get("id")
     pessoa = db.query(Pessoa).filter(Pessoa.id == pessoa_id).first()
-
     if not pessoa:
         raise HTTPException(status_code=401, detail="Pessoa não encontrada")
 
     usuario = db.query(Usuario).filter(Usuario.id_pessoa == pessoa.id).first()
-
     if not usuario:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
 
+    # --- nova parte: montar 'dados' com (cliente, cliente_nome, matricula) por CPF ---
+    sql_dados = text("""
+        SELECT DISTINCT
+               TRIM(c.cliente::text)        AS id,
+               TRIM(c.cliente_nome)         AS nome,
+               TRIM(c.matricula::text)      AS mat
+        FROM tb_holerite_cabecalhos c
+        WHERE TRIM(c.cpf::text) = TRIM(:cpf)
+          AND c.matricula IS NOT NULL AND TRIM(c.matricula::text) <> ''
+          AND c.cliente  IS NOT NULL AND TRIM(c.cliente::text)  <> ''
+        ORDER BY nome NULLS LAST, id, mat
+    """)
+    rows = db.execute(sql_dados, {"cpf": str(pessoa.cpf).strip()}).fetchall()
+
+    dados: List[DadoItem] = [
+        DadoItem(id=row[0], nome=row[1], matricula=row[2])
+        for row in rows
+    ]
+
+    # Se quiser garantir que a matrícula armazenada na tabela Pessoa também apareça:
+    # (apenas se existir cliente associado em Pessoa; caso contrário, você pode pular)
+    # Ex.: forçar inclusão manual
+    if getattr(pessoa, "matricula", None) and getattr(pessoa, "cliente", None):
+        mat_pessoa = str(pessoa.matricula).strip()
+        cli_pessoa = str(pessoa.cliente).strip()
+        if mat_pessoa and cli_pessoa and all(not (d.id == cli_pessoa and d.matricula == mat_pessoa) for d in dados):
+            dados.insert(0, DadoItem(id=cli_pessoa, nome=None, matricula=mat_pessoa))
+        
     return PessoaResponse(
         nome=pessoa.nome,
-        cpf=pessoa.cpf,
-        email=usuario.email,
-        cliente=pessoa.cliente,
-        centro_de_custo=pessoa.centro_de_custo,
-        matricula=pessoa.matricula,
-        gestor=pessoa.gestor
+        cpf=str(pessoa.cpf),
+        email=str(usuario.email),
+        cliente=getattr(pessoa, "cliente", None),
+        centro_de_custo=getattr(pessoa, "centro_de_custo", None),
+        gestor=bool(getattr(pessoa, "gestor", False)),
+        dados=dados
     )
-
 
 @router.post("/user/refresh")
 def refresh_token(request: Request, db: Session = Depends(get_db)):

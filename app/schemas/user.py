@@ -1,7 +1,7 @@
 # app/schemas/user.py
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
-from typing import Optional, Annotated
+from typing import Optional, Annotated, List
 from datetime import date
 
 #
@@ -50,6 +50,14 @@ class UsuarioLogin(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     usuario: str   # e-mail ou CPF
     senha: str
+
+class DadoItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    nome: Optional[str] = None
+    matricula: str
+
 class PessoaResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -57,9 +65,9 @@ class PessoaResponse(BaseModel):
     cpf: Optional[str]
     cliente: Optional[str]
     centro_de_custo: Optional[str]
-    matricula: Optional[str]
     gestor: Optional[bool]
-    email: str     # do Usuário associado
+    email: str
+    dados: List[DadoItem]
 
 class CadastroColaborador(BaseModel):
     model_config = ConfigDict(from_attributes=True)

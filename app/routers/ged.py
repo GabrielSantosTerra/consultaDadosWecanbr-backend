@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException, Form, Depends, Response
+from fastapi import APIRouter, HTTPException, Form, Depends, Response, Body
 from typing import Any, Dict, Optional, Set
 import requests
 from pydantic import BaseModel, Field, field_validator
+from pydantic import ConfigDict
 from datetime import datetime
 from babel.dates import format_date
 from sqlalchemy import text
@@ -76,10 +77,18 @@ class SearchDocumentosRequest(BaseModel):
         s = str(v).strip()
         return [s] if s else None
 
+# class BuscarHolerite(BaseModel):
+#     cpf: str = Field(..., min_length=11, max_length=14, description="CPF sem formatação, 11 dígitos")
+#     matricula: str
+#     competencia: str
+
 class BuscarHolerite(BaseModel):
-    cpf: str = Field(..., min_length=11, max_length=14, description="CPF sem formatação, 11 dígitos")
-    matricula: str
-    competencia: str
+    model_config = ConfigDict(from_attributes=True)  # Pydantic v2
+    cpf: str = Field(..., min_length=1)
+    matricula: Optional[str] = None
+    competencia: Optional[str] = None
+    empresa: Optional[str] = None        # código do cliente (do cabeçalho)
+    cliente_nome: Optional[str] = None   # nome da empresa (do cabeçalho)
 
 class MontarHolerite(BaseModel):
     matricula: str
@@ -361,98 +370,440 @@ def upload_documento_base64(payload: UploadBase64Payload):
     except Exception:
         raise HTTPException(status_code=500, detail=f"Erro no upload: {response.text}")
 
+# @router.post("/documents/holerite/buscar")
+# def buscar_holerite(
+#     payload: "BuscarHolerite",
+#     db: Session = Depends(get_db),
+# ):
+#     cpf = (payload.cpf or "").strip()
+#     matricula = (payload.matricula or "").strip()
+#     competencia = (getattr(payload, "competencia", None) or "").strip()
+
+#     if not competencia:
+#         sql_lista_comp = text("""
+#             WITH norm_evt AS (
+#                 SELECT DISTINCT
+#                        regexp_replace(TRIM(e.competencia), '[^0-9]', '', 'g') AS comp,
+#                        e.lote
+#                 FROM tb_holerite_eventos e
+#                 WHERE TRIM(e.cpf::text)       = TRIM(:cpf)
+#                   AND TRIM(e.matricula::text) = TRIM(:matricula)
+#                   AND e.competencia IS NOT NULL
+#             ),
+#             norm_cab AS (
+#                 SELECT DISTINCT
+#                        regexp_replace(TRIM(c.competencia), '[^0-9]', '', 'g') AS comp,
+#                        c.lote
+#                 FROM tb_holerite_cabecalhos c
+#                 WHERE TRIM(c.cpf::text)       = TRIM(:cpf)
+#                   AND TRIM(c.matricula::text) = TRIM(:matricula)
+#                   AND c.competencia IS NOT NULL
+#             ),
+#             norm_rod AS (
+#                 SELECT DISTINCT
+#                        regexp_replace(TRIM(r.competencia), '[^0-9]', '', 'g') AS comp,
+#                        r.lote
+#                 FROM tb_holerite_rodapes r
+#                 WHERE TRIM(r.cpf::text)       = TRIM(:cpf)
+#                   AND TRIM(r.matricula::text) = TRIM(:matricula)
+#                   AND r.competencia IS NOT NULL
+#             ),
+#             valid AS (
+#                 SELECT e.comp
+#                 FROM norm_evt e
+#                 JOIN norm_cab c ON c.comp = e.comp AND c.lote = e.lote
+#                 JOIN norm_rod r ON r.comp = e.comp AND r.lote = e.lote
+#                 GROUP BY e.comp
+#             )
+#             SELECT
+#               CAST(SUBSTRING(comp, 1, 4) AS int) AS ano,
+#               CAST(SUBSTRING(comp, 5, 2) AS int) AS mes
+#             FROM valid
+#             WHERE comp ~ '^[0-9]{6}$'
+#             ORDER BY ano DESC, mes DESC
+#         """)
+#         rows = db.execute(sql_lista_comp, {"cpf": cpf, "matricula": matricula}).fetchall()
+#         competencias = [{"ano": r[0], "mes": r[1]} for r in rows if r[0] is not None and r[1] is not None]
+
+#         if not competencias:
+#             raise HTTPException(
+#                 status_code=404,
+#                 detail="Nenhuma competência disponível com eventos, cabeçalho e rodapé no mesmo lote."
+#             )
+
+#         return {"competencias": competencias}
+
+#     params_base = {"cpf": cpf, "matricula": matricula, "competencia": competencia}
+
+#     filtro_comp = """
+#       regexp_replace(TRIM(x.competencia), '[^0-9]', '', 'g') =
+#       regexp_replace(TRIM(:competencia),  '[^0-9]', '', 'g')
+#     """
+
+#     sql_has_evt = text(f"""
+#         SELECT EXISTS(
+#             SELECT 1
+#             FROM tb_holerite_eventos x
+#             WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
+#               AND TRIM(x.matricula::text) = TRIM(:matricula)
+#               AND {filtro_comp}
+#         ) AS has_evt
+#     """)
+#     has_evt = bool(db.execute(sql_has_evt, params_base).scalar())
+#     if not has_evt:
+#         raise HTTPException(
+#             status_code=404,
+#             detail="Nenhum evento de holerite encontrado para os critérios informados."
+#         )
+
+#     sql_eventos = text(f"""
+#         SELECT *
+#         FROM tb_holerite_eventos x
+#         WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
+#           AND TRIM(x.matricula::text) = TRIM(:matricula)
+#           AND {filtro_comp}
+#         ORDER BY evento
+#     """)
+#     evt_res = db.execute(sql_eventos, params_base)
+#     eventos = [dict(zip(evt_res.keys(), row)) for row in evt_res.fetchall()]
+#     if not eventos:
+#         raise HTTPException(status_code=404, detail="Nenhum evento encontrado após a consulta.")
+
+#     lotes = sorted({e.get("lote") for e in eventos if e.get("lote") is not None}, reverse=True)
+
+#     cabecalho = None
+#     rodape = None
+#     lote_escolhido = None
+
+#     for lote in lotes or [None]:
+#         params_try = dict(params_base)
+#         if lote is not None:
+#             params_try["lote"] = lote
+
+#         if lote is not None:
+#             sql_cab = text(f"""
+#                 SELECT *
+#                 FROM tb_holerite_cabecalhos x
+#                 WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
+#                   AND TRIM(x.matricula::text) = TRIM(:matricula)
+#                   AND {filtro_comp}
+#                   AND x.lote = :lote
+#                 LIMIT 1
+#             """)
+#         else:
+#             sql_cab = text(f"""
+#                 SELECT *
+#                 FROM tb_holerite_cabecalhos x
+#                 WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
+#                   AND TRIM(x.matricula::text) = TRIM(:matricula)
+#                   AND {filtro_comp}
+#                 ORDER BY lote DESC NULLS LAST
+#                 LIMIT 1
+#             """)
+
+#         cab_res = db.execute(sql_cab, params_try)
+#         cab_row = cab_res.first()
+#         cab_tmp = dict(zip(cab_res.keys(), cab_row)) if cab_row else None
+
+#         if lote is not None:
+#             sql_rod = text(f"""
+#                 SELECT *
+#                 FROM tb_holerite_rodapes x
+#                 WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
+#                   AND TRIM(x.matricula::text) = TRIM(:matricula)
+#                   AND {filtro_comp}
+#                   AND x.lote = :lote
+#                 LIMIT 1
+#             """)
+#         else:
+#             sql_rod = text(f"""
+#                 SELECT *
+#                 FROM tb_holerite_rodapes x
+#                 WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
+#                   AND TRIM(x.matricula::text) = TRIM(:matricula)
+#                   AND {filtro_comp}
+#                 ORDER BY lote DESC NULLS LAST
+#                 LIMIT 1
+#             """)
+
+#         rod_res = db.execute(sql_rod, params_try)
+#         rod_row = rod_res.first()
+#         rod_tmp = dict(zip(rod_res.keys(), rod_row)) if rod_row else None
+
+#         if cab_tmp and rod_tmp:
+#             cabecalho = cab_tmp
+#             rodape = rod_tmp
+#             lote_escolhido = lote
+#             break
+
+#     if not cabecalho and not rodape:
+#         raise HTTPException(
+#             status_code=404,
+#             detail="Cabeçalho e rodapé ausentes para a competência informada (possível divergência de lote)."
+#         )
+#     if not cabecalho:
+#         raise HTTPException(status_code=404, detail="Cabeçalho ausente para a competência/lote informados.")
+#     if not rodape:
+#         raise HTTPException(status_code=404, detail="Rodapé ausente para a competência/lote informados.")
+
+#     if lote_escolhido is not None:
+#         eventos = [e for e in eventos if e.get("lote") == lote_escolhido]
+#         if not eventos:
+#             raise HTTPException(
+#                 status_code=404,
+#                 detail="Eventos não encontrados para o mesmo lote do cabeçalho/rodapé."
+#             )
+
+#     return {
+#         "competencia_utilizada": competencia,
+#         "cabecalho": cabecalho,
+#         "eventos": eventos,
+#         "rodape": rodape
+#     }
+
 @router.post("/documents/holerite/buscar")
 def buscar_holerite(
-    payload: "BuscarHolerite",
+    payload: BuscarHolerite = Body(...),
     db: Session = Depends(get_db),
 ):
     cpf = (payload.cpf or "").strip()
-    matricula = (payload.matricula or "").strip()
-    competencia = (getattr(payload, "competencia", None) or "").strip()
+    matricula = (payload.matricula or "").strip() if payload.matricula else ""
+    competencia = (payload.competencia or "").strip() if payload.competencia else ""
+    empresa = (payload.empresa or None)
+    cliente_nome = (payload.cliente_nome or None)
 
-    if not competencia:
-        sql_lista_comp = text("""
+    if not cpf:
+        raise HTTPException(status_code=422, detail="Informe cpf.")
+
+    # Filtros dinâmicos
+    params: Dict[str, Any] = {"cpf": cpf}
+    f_evt = ""  # eventos
+    f_cab = ""  # cabeçalhos (empresa/cliente_nome só aqui)
+    f_rod = ""  # rodapés
+
+    if matricula:
+        f_evt += " AND TRIM(e.matricula::text) = TRIM(:matricula) "
+        f_cab += " AND TRIM(c.matricula::text) = TRIM(:matricula) "
+        f_rod += " AND TRIM(r.matricula::text) = TRIM(:matricula) "
+        params["matricula"] = matricula
+
+    if empresa:
+        f_cab += " AND TRIM(c.cliente::text) = TRIM(:empresa) "
+        params["empresa"] = str(empresa).strip()
+
+    if cliente_nome:
+        f_cab += " AND TRIM(c.cliente_nome) = TRIM(:cliente_nome) "
+        params["cliente_nome"] = cliente_nome.strip()
+
+    filtro_comp_evt = """
+      regexp_replace(TRIM(e.competencia), '[^0-9]', '', 'g') =
+      regexp_replace(TRIM(:competencia),  '[^0-9]', '', 'g')
+    """
+    filtro_comp_cab = filtro_comp_evt.replace("e.", "c.")
+    filtro_comp_rod = filtro_comp_evt.replace("e.", "r.")
+
+    # =========================================================
+    # 1) Sem competencia e sem empresa -> listar EMPRESAS por CPF
+    # =========================================================
+    if not competencia and not empresa and not cliente_nome:
+        sql_empresas = text(f"""
             WITH norm_evt AS (
                 SELECT DISTINCT
                        regexp_replace(TRIM(e.competencia), '[^0-9]', '', 'g') AS comp,
-                       e.lote
+                       e.lote, e.matricula
                 FROM tb_holerite_eventos e
-                WHERE TRIM(e.cpf::text)       = TRIM(:cpf)
-                  AND TRIM(e.matricula::text) = TRIM(:matricula)
+                WHERE TRIM(e.cpf::text) = TRIM(:cpf)
                   AND e.competencia IS NOT NULL
             ),
             norm_cab AS (
                 SELECT DISTINCT
                        regexp_replace(TRIM(c.competencia), '[^0-9]', '', 'g') AS comp,
-                       c.lote
+                       c.lote, c.matricula, c.cliente, c.cliente_nome
                 FROM tb_holerite_cabecalhos c
-                WHERE TRIM(c.cpf::text)       = TRIM(:cpf)
-                  AND TRIM(c.matricula::text) = TRIM(:matricula)
+                WHERE TRIM(c.cpf::text) = TRIM(:cpf)
                   AND c.competencia IS NOT NULL
+            ),
+            norm_rod AS (
+                SELECT DISTINCT
+                       regexp_replace(TRIM(r.competencia), '[^0-9]', '', 'g') AS comp,
+                       r.lote, r.matricula
+                FROM tb_holerite_rodapes r
+                WHERE TRIM(r.cpf::text) = TRIM(:cpf)
+                  AND r.competencia IS NOT NULL
+            ),
+            valid AS (
+                SELECT c.cliente, c.cliente_nome
+                FROM norm_evt e
+                JOIN norm_cab c ON c.comp = e.comp AND c.lote = e.lote AND c.matricula = e.matricula
+                JOIN norm_rod r ON r.comp = e.comp AND r.lote = e.lote AND r.matricula = e.matricula
+                GROUP BY c.cliente, c.cliente_nome
+            )
+            SELECT DISTINCT cliente, cliente_nome
+            FROM valid
+            ORDER BY cliente_nome NULLS LAST, cliente
+        """)
+        rows = db.execute(sql_empresas, {"cpf": cpf}).fetchall()
+        empresas = [{"cliente": str(r[0]) if r[0] is not None else None,
+                     "cliente_nome": r[1]} for r in rows]
+        if not empresas:
+            raise HTTPException(status_code=404, detail="Nenhuma empresa vinculada encontrada para o CPF.")
+        return {"tipo": "empresas", "empresas": empresas}
+
+    # =========================================================
+    # 2) COM EMPRESA e SEM COMPETÊNCIA
+    #    -> **Exigir chave composta**: CPF + MATRÍCULA
+    #       Se a matrícula não vier, resolver primeiro.
+    # =========================================================
+    if not competencia and (empresa or cliente_nome):
+        # Se matrícula não veio: descobrir todas as matrículas do CPF para essa empresa (no CABEÇALHO)
+        if not matricula:
+            sql_mats_empresa = text(f"""
+                SELECT DISTINCT TRIM(c.matricula::text) AS matricula, MAX(TRIM(c.cliente_nome)) AS cliente_nome
+                FROM tb_holerite_cabecalhos c
+                WHERE TRIM(c.cpf::text) = TRIM(:cpf)
+                  {f_cab}  -- já inclui cliente/cliente_nome se informados
+                  AND c.matricula IS NOT NULL AND TRIM(c.matricula::text) <> ''
+                GROUP BY TRIM(c.matricula::text)
+                ORDER BY 1
+            """)
+            mats_rows = db.execute(sql_mats_empresa, params).fetchall()
+            mats = [r[0] for r in mats_rows]
+
+            if len(mats) == 0:
+                raise HTTPException(status_code=404, detail="Nenhuma matrícula encontrada para o CPF/empresa.")
+            if len(mats) > 1:
+                # 409: o front deve escolher a matrícula
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "Mais de uma matrícula encontrada para a empresa. Informe o campo 'matricula'.",
+                        "matriculas": mats
+                    }
+                )
+
+            # ÚNICA matrícula → aplicar e seguir
+            matricula = mats[0]
+            params["matricula"] = matricula
+            f_evt += " AND TRIM(e.matricula::text) = TRIM(:matricula) "
+            f_cab += " AND TRIM(c.matricula::text) = TRIM(:matricula) "
+            f_rod += " AND TRIM(r.matricula::text) = TRIM(:matricula) "
+
+        # Agora há empresa + matrícula → listar competências dessa chave (cpf+empresa+matricula)
+        sql_lista_comp = text(f"""
+            WITH norm_evt AS (
+                SELECT DISTINCT
+                       regexp_replace(TRIM(e.competencia), '[^0-9]', '', 'g') AS comp,
+                       e.lote
+                FROM tb_holerite_eventos e
+                WHERE TRIM(e.cpf::text) = TRIM(:cpf)
+                  AND e.competencia IS NOT NULL
+                  {f_evt}    -- filtra por matrícula
+            ),
+            norm_cab AS (
+                SELECT DISTINCT
+                       regexp_replace(TRIM(c.competencia), '[^0-9]', '', 'g') AS comp,
+                       c.lote, MAX(c.cliente_nome) OVER () AS cliente_nome
+                FROM tb_holerite_cabecalhos c
+                WHERE TRIM(c.cpf::text) = TRIM(:cpf)
+                  AND c.competencia IS NOT NULL
+                  {f_cab}    -- filtra por empresa + matrícula
             ),
             norm_rod AS (
                 SELECT DISTINCT
                        regexp_replace(TRIM(r.competencia), '[^0-9]', '', 'g') AS comp,
                        r.lote
                 FROM tb_holerite_rodapes r
-                WHERE TRIM(r.cpf::text)       = TRIM(:cpf)
-                  AND TRIM(r.matricula::text) = TRIM(:matricula)
+                WHERE TRIM(r.cpf::text) = TRIM(:cpf)
                   AND r.competencia IS NOT NULL
+                  {f_rod}    -- filtra por matrícula
             ),
             valid AS (
-                SELECT e.comp
+                SELECT e.comp, (SELECT MAX(c2.cliente_nome) FROM norm_cab c2) AS cliente_nome
                 FROM norm_evt e
                 JOIN norm_cab c ON c.comp = e.comp AND c.lote = e.lote
                 JOIN norm_rod r ON r.comp = e.comp AND r.lote = e.lote
                 GROUP BY e.comp
             )
             SELECT
+              (SELECT cliente_nome FROM valid v2 LIMIT 1) AS cliente_nome,
               CAST(SUBSTRING(comp, 1, 4) AS int) AS ano,
               CAST(SUBSTRING(comp, 5, 2) AS int) AS mes
             FROM valid
-            WHERE comp ~ '^[0-9]{6}$'
+            WHERE comp ~ '^[0-9]{{6}}$'
             ORDER BY ano DESC, mes DESC
         """)
-        rows = db.execute(sql_lista_comp, {"cpf": cpf, "matricula": matricula}).fetchall()
-        competencias = [{"ano": r[0], "mes": r[1]} for r in rows if r[0] is not None and r[1] is not None]
-
+        rows = db.execute(sql_lista_comp, params).fetchall()
+        competencias = [{"ano": r[1], "mes": r[2]} for r in rows if r[1] is not None and r[2] is not None]
         if not competencias:
+            raise HTTPException(status_code=404, detail="Nenhuma competência disponível para CPF/empresa/matrícula informados.")
+
+        # Captura o cliente_nome se disponível via consulta; se não, mantém o que veio
+        cliente_nome_out = rows[0][0] if rows and rows[0][0] is not None else cliente_nome
+
+        return {
+            "tipo": "competencias",
+            "empresa": empresa,
+            "cliente_nome": cliente_nome_out,
+            "matricula": matricula,
+            "competencias": competencias
+        }
+
+    # =========================================================
+    # 3) COMPETÊNCIA informada
+    #    (se matricula não veio, inferir única respeitando filtros de empresa/cliente_nome no CABEÇALHO)
+    # =========================================================
+    if competencia and not matricula:
+        params_comp = dict(params)
+        params_comp["competencia"] = competencia
+        sql_mats = text(f"""
+            SELECT DISTINCT c.matricula
+            FROM tb_holerite_cabecalhos c
+            WHERE TRIM(c.cpf::text) = TRIM(:cpf)
+              AND {filtro_comp_cab}
+              {f_cab}      -- empresa/cliente_nome só aqui
+        """)
+        mats = [str(r[0]) for r in db.execute(sql_mats, params_comp).fetchall() if r[0] is not None]
+        if len(mats) == 0:
+            raise HTTPException(status_code=404, detail="Nenhum registro encontrado para a competência informada.")
+        if len(mats) > 1:
             raise HTTPException(
-                status_code=404,
-                detail="Nenhuma competência disponível com eventos, cabeçalho e rodapé no mesmo lote."
+                status_code=409,
+                detail={
+                    "message": "Mais de uma matrícula encontrada para a competência. Informe o campo 'matricula'.",
+                    "matriculas": mats
+                }
             )
+        matricula = mats[0]
+        params["matricula"] = matricula
+        f_evt += " AND TRIM(e.matricula::text) = TRIM(:matricula) "
+        f_cab += " AND TRIM(c.matricula::text) = TRIM(:matricula) "
+        f_rod += " AND TRIM(r.matricula::text) = TRIM(:matricula) "
 
-        return {"competencias": competencias}
+    # A partir daqui temos competencia e (possivelmente) matricula
+    params_base = dict(params)
+    params_base["competencia"] = competencia
 
-    params_base = {"cpf": cpf, "matricula": matricula, "competencia": competencia}
-
-    filtro_comp = """
-      regexp_replace(TRIM(x.competencia), '[^0-9]', '', 'g') =
-      regexp_replace(TRIM(:competencia),  '[^0-9]', '', 'g')
-    """
-
+    # 3.1 Verifica eventos
     sql_has_evt = text(f"""
         SELECT EXISTS(
             SELECT 1
-            FROM tb_holerite_eventos x
-            WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
-              AND TRIM(x.matricula::text) = TRIM(:matricula)
-              AND {filtro_comp}
+            FROM tb_holerite_eventos e
+            WHERE TRIM(e.cpf::text) = TRIM(:cpf)
+              AND {filtro_comp_evt}
+              {f_evt}
         ) AS has_evt
     """)
     has_evt = bool(db.execute(sql_has_evt, params_base).scalar())
     if not has_evt:
-        raise HTTPException(
-            status_code=404,
-            detail="Nenhum evento de holerite encontrado para os critérios informados."
-        )
+        raise HTTPException(status_code=404, detail="Nenhum evento de holerite encontrado para os critérios informados.")
 
+    # 3.2 Busca eventos
     sql_eventos = text(f"""
         SELECT *
-        FROM tb_holerite_eventos x
-        WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
-          AND TRIM(x.matricula::text) = TRIM(:matricula)
-          AND {filtro_comp}
+        FROM tb_holerite_eventos e
+        WHERE TRIM(e.cpf::text) = TRIM(:cpf)
+          AND {filtro_comp_evt}
+          {f_evt}
         ORDER BY evento
     """)
     evt_res = db.execute(sql_eventos, params_base)
@@ -460,6 +811,7 @@ def buscar_holerite(
     if not eventos:
         raise HTTPException(status_code=404, detail="Nenhum evento encontrado após a consulta.")
 
+    # 3.3 Alinha por lote
     lotes = sorted({e.get("lote") for e in eventos if e.get("lote") is not None}, reverse=True)
 
     cabecalho = None
@@ -471,23 +823,24 @@ def buscar_holerite(
         if lote is not None:
             params_try["lote"] = lote
 
+        # CABEÇALHO (aplica empresa/cliente_nome + matricula)
         if lote is not None:
             sql_cab = text(f"""
                 SELECT *
-                FROM tb_holerite_cabecalhos x
-                WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
-                  AND TRIM(x.matricula::text) = TRIM(:matricula)
-                  AND {filtro_comp}
-                  AND x.lote = :lote
+                FROM tb_holerite_cabecalhos c
+                WHERE TRIM(c.cpf::text) = TRIM(:cpf)
+                  AND {filtro_comp_cab}
+                  {f_cab}
+                  AND c.lote = :lote
                 LIMIT 1
             """)
         else:
             sql_cab = text(f"""
                 SELECT *
-                FROM tb_holerite_cabecalhos x
-                WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
-                  AND TRIM(x.matricula::text) = TRIM(:matricula)
-                  AND {filtro_comp}
+                FROM tb_holerite_cabecalhos c
+                WHERE TRIM(c.cpf::text) = TRIM(:cpf)
+                  AND {filtro_comp_cab}
+                  {f_cab}
                 ORDER BY lote DESC NULLS LAST
                 LIMIT 1
             """)
@@ -496,23 +849,24 @@ def buscar_holerite(
         cab_row = cab_res.first()
         cab_tmp = dict(zip(cab_res.keys(), cab_row)) if cab_row else None
 
+        # RODAPÉ (apenas cpf+matricula+comp+lote)
         if lote is not None:
             sql_rod = text(f"""
                 SELECT *
-                FROM tb_holerite_rodapes x
-                WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
-                  AND TRIM(x.matricula::text) = TRIM(:matricula)
-                  AND {filtro_comp}
-                  AND x.lote = :lote
+                FROM tb_holerite_rodapes r
+                WHERE TRIM(r.cpf::text) = TRIM(:cpf)
+                  AND {filtro_comp_rod}
+                  {f_rod}
+                  AND r.lote = :lote
                 LIMIT 1
             """)
         else:
             sql_rod = text(f"""
                 SELECT *
-                FROM tb_holerite_rodapes x
-                WHERE TRIM(x.cpf::text)       = TRIM(:cpf)
-                  AND TRIM(x.matricula::text) = TRIM(:matricula)
-                  AND {filtro_comp}
+                FROM tb_holerite_rodapes r
+                WHERE TRIM(r.cpf::text) = TRIM(:cpf)
+                  AND {filtro_comp_rod}
+                  {f_rod}
                 ORDER BY lote DESC NULLS LAST
                 LIMIT 1
             """)
@@ -530,12 +884,12 @@ def buscar_holerite(
     if not cabecalho and not rodape:
         raise HTTPException(
             status_code=404,
-            detail="Cabeçalho e rodapé ausentes para a competência informada (possível divergência de lote)."
+            detail="Cabeçalho e rodapé ausentes para a competência informada (possível divergência de lote/matrícula/empresa)."
         )
     if not cabecalho:
-        raise HTTPException(status_code=404, detail="Cabeçalho ausente para a competência/lote informados.")
+        raise HTTPException(status_code=404, detail="Cabeçalho ausente para a competência/lote/matrícula/empresa.")
     if not rodape:
-        raise HTTPException(status_code=404, detail="Rodapé ausente para a competência/lote informados.")
+        raise HTTPException(status_code=404, detail="Rodapé ausente para a competência/lote/matrícula/empresa.")
 
     if lote_escolhido is not None:
         eventos = [e for e in eventos if e.get("lote") == lote_escolhido]
@@ -546,12 +900,16 @@ def buscar_holerite(
             )
 
     return {
+        "tipo": "holerite",
         "competencia_utilizada": competencia,
+        "empresa_utilizada": (cabecalho.get("cliente") if cabecalho else None),
+        "cliente_nome_utilizado": (cabecalho.get("cliente_nome") if cabecalho else None),
+        "matricula_utilizada": params.get("matricula"),
         "cabecalho": cabecalho,
         "eventos": eventos,
         "rodape": rodape
     }
-
+#===========================================================================================================
 
 @router.post("/documents/search")
 def buscar_search_documentos(payload: SearchDocumentosRequest):
