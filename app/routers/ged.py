@@ -674,7 +674,7 @@ def buscar_holerite(
             if len(mats) > 1:
                 # 409: o front deve escolher a matrícula
                 raise HTTPException(
-                    status_code=200,
+                    status_code=409,
                     detail={
                         "message": "Mais de uma matrícula encontrada para a empresa. Informe o campo 'matricula'.",
                         "matriculas": mats
