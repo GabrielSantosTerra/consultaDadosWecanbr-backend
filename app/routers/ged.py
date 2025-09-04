@@ -293,7 +293,7 @@ def upload_documento_base64(payload: UploadBase64Payload):
 # ============================
 # NOVA ROTA: listar competências
 # ============================
-@router.get("/documents/holerite/competencias")
+@router.post("/documents/holerite/competencias")
 async def listar_competencias_holerite(
     request: Request,
     cpf: Optional[str] = Query(None, description="CPF (com ou sem máscara)"),
