@@ -189,6 +189,12 @@ def _cpf_from_any(value: str) -> Optional[str]:
         return None
     return digits[-11:]
 
+def _headers(auth_key: str) -> Dict[str, str]:
+    return {
+        "Authorization": auth_key,
+        "Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-1",
+    }
+
 BASE_URL = "http://ged.byebyepaper.com.br:9090/idocs_bbpaper/api/v1"
 
 def login(conta: str, usuario: str, senha: str) -> str:
@@ -785,3 +791,192 @@ def baixar_documento(payload: DownloadDocumentoPayload):
             "erro": False,
             "base64_raw": response.text
         }
+
+@router.post("/documents/search")
+def buscar_search_documentos(payload: SearchDocumentosRequest, db: Session = Depends(get_db)):
+    # 1) autenticação no GED
+    try:
+        auth_key = login(
+            conta=settings.GED_CONTA, usuario=settings.GED_USUARIO, senha=settings.GED_SENHA
+        )
+    except Exception as e:
+        raise HTTPException(502, f"Falha na autenticação no GED: {e}")
+    headers = _headers(auth_key)
+
+    # 2) campos do template
+    r_fields = requests.post(
+        f"{BASE_URL}/templates/getfields",
+        data={"id_template": payload.id_template},
+        headers=headers,
+        timeout=30,
+    )
+    r_fields.raise_for_status()
+    fields_json = r_fields.json() or {}
+    nomes_campos = [f.get("nomecampo") for f in fields_json.get("fields", []) if f.get("nomecampo")]
+
+    if not nomes_campos:
+        raise HTTPException(400, "Template sem campos ou inválido")
+    if payload.campo_anomes not in nomes_campos:
+        raise HTTPException(400, f"Campo '{payload.campo_anomes}' não existe no template")
+
+    # 3) monta cp[] na ordem do template
+    lista_cp = ["" for _ in nomes_campos]
+    for item in payload.cp:
+        if item.nome not in nomes_campos:
+            raise HTTPException(400, f"Campo '{item.nome}' não existe no template")
+        lista_cp[nomes_campos.index(item.nome)] = (item.valor or "").strip()
+
+    def _campos_template_txt() -> str:
+        return ", ".join(nomes_campos) if nomes_campos else "(vazio)"
+
+    # 4) chave composta: matricula (exato) + colaborador (aproximado %CPF%)
+    if "matricula" not in nomes_campos:
+        raise HTTPException(400, f"Template precisa ter 'matricula'. Campos: [{_campos_template_txt()}]")
+    idx_matricula = nomes_campos.index("matricula")
+    matricula_val = (lista_cp[idx_matricula] or "").strip()
+    if not matricula_val:
+        raise HTTPException(422, "Informe 'matricula' em cp[] para a chave composta.")
+
+    # campo colaborador é obrigatório para essa estratégia (não existe 'cpf' no template)
+    norm_map = {_norm(n): i for i, n in enumerate(nomes_campos)}
+    idx_colaborador = norm_map.get(_norm("colaborador"))
+    if idx_colaborador is None:
+        raise HTTPException(
+            422,
+            f"O template não possui o campo 'colaborador' necessário para busca aproximada por CPF. "
+            f"Campos do template: [{_campos_template_txt()}]."
+        )
+
+    # extrai CPF do valor enviado no campo colaborador (pode ser 'NOME_04258297232' ou só '04258297232')
+    colaborador_original = (lista_cp[idx_colaborador] or "").strip()
+    cpf_extraido = _cpf_from_any(colaborador_original)
+    if not cpf_extraido:
+        raise HTTPException(
+            422,
+            "Não foi possível extrair um CPF válido (11 dígitos) do campo 'colaborador'. "
+            "Envie 'colaborador' como 'NOME_99999999999' ou apenas os 11 dígitos do CPF."
+        )
+
+    # >>> ALTERAÇÃO PRINCIPAL: força LIKE no colaborador: %CPF%
+    lista_cp[idx_colaborador] = f"%{cpf_extraido}%"
+
+    # 5) se não informar anomes/anomes_in → lista meses por tipodedoc+matricula
+    if not payload.anomes and not payload.anomes_in:
+        if "tipodedoc" not in nomes_campos:
+            raise HTTPException(400, "Campo 'tipodedoc' não existe no template")
+        tipodedoc_val = (lista_cp[nomes_campos.index("tipodedoc")] or "").strip()
+        if not tipodedoc_val:
+            raise HTTPException(400, "Para listar anomes, informe 'tipodedoc' em cp[].")
+
+        form_filter = [
+            ("id_tipo", str(payload.id_template)),
+            ("filtro", payload.campo_anomes),
+            ("filtro1", "tipodedoc"),
+            ("filtro1_valor", tipodedoc_val),
+            ("filtro2", "matricula"),
+            ("filtro2_valor", matricula_val),
+        ]
+        try:
+            rf = requests.post(f"{BASE_URL}/documents/filter", data=form_filter, headers=headers, timeout=60)
+            rf.raise_for_status()
+            fdata = rf.json() or {}
+            if fdata.get("error"):
+                raise RuntimeError(f"GED error: {fdata.get('message')}")
+            grupos = fdata.get("groups") or []
+
+            meses_set: Set[str] = set()
+            for g in grupos:
+                bruto = str(g.get(payload.campo_anomes, "")).strip()
+                n = _normaliza_anomes(bruto)
+                if n:
+                    meses_set.add(n)
+
+            if meses_set:
+                meses_sorted_objs = sorted(
+                    (_to_ano_mes(m) for m in meses_set),
+                    key=lambda x: (x["ano"], x["mes"]),
+                    reverse=True
+                )
+                return {"anomes": meses_sorted_objs}
+
+        except (requests.HTTPError, requests.RequestException, RuntimeError):
+            # fallback: tenta pegar meses pelo search com LIKE já posicionado em 'colaborador'
+            meses_norm = _coleta_anomes_via_search(
+                headers=headers,
+                id_template=payload.id_template,
+                nomes_campos=nomes_campos,
+                lista_cp=lista_cp,
+                campo_anomes=payload.campo_anomes,
+            )
+            if meses_norm:
+                meses_sorted_objs = sorted(
+                    (_to_ano_mes(m) for m in meses_norm),
+                    key=lambda x: (x["ano"], x["mes"]),
+                    reverse=True
+                )
+                return {"anomes": meses_sorted_objs}
+            raise HTTPException(404, "Nenhum mês disponível para os parâmetros enviados.")
+
+    # 6) filtra por anomes/anomes_in (se vier)
+    alvo: Set[str] = set()
+    if payload.anomes:
+        n = _normaliza_anomes(payload.anomes)
+        if not n:
+            raise HTTPException(400, "anomes inválido. Use 'YYYY-MM', 'YYYYMM', 'YYYY/MM' ou 'MM/YYYY'.")
+        alvo.add(n)
+    if payload.anomes_in:
+        for val in payload.anomes_in:
+            n = _normaliza_anomes(val)
+            if not n:
+                raise HTTPException(400, f"Valor inválido em anomes_in: '{val}'")
+            alvo.add(n)
+
+    # 7) executa a busca (já com colaborador = %CPF%)
+    def _do_search(cp_override: Optional[List[str]] = None):
+        form = [("id_tipo", str(payload.id_template))]
+        form += [("cp[]", v) for v in (cp_override if cp_override is not None else lista_cp)]
+        form += [
+            ("ordem", "no_ordem"),
+            ("dt_criacao", ""),
+            ("pagina", "1"),
+            ("colecao", "S"),
+        ]
+        r = requests.post(f"{BASE_URL}/documents/search", data=form, headers=headers, timeout=60)
+        r.raise_for_status()
+        data = r.json() or {}
+        if data.get("error"):
+            # mensagem de erro do GED fica preservada aqui
+            raise HTTPException(500, f"GED erro (search): {data.get('message')}")
+        return [_flatten_attributes(doc) for doc in (data.get("documents") or [])]
+
+    try:
+        documentos_total = _do_search()
+    except requests.HTTPError as err:
+        # repassa com detalhe do backend GED
+        try:
+            raise HTTPException(err.response.status_code, f"GED erro: {err.response.json()}")
+        except Exception:
+            raise HTTPException(getattr(err.response, "status_code", 502), f"GED erro: {getattr(err.response, 'text', err)}")
+    except requests.RequestException as e:
+        raise HTTPException(502, f"Falha ao consultar GED (search): {e}")
+
+    # 8) pós-processa e aplica filtro por meses (se houver)
+    filtrados: List[Dict[str, Any]] = []
+    for d in documentos_total:
+        bruto = str(d.get(payload.campo_anomes, "")).strip()
+        n = _normaliza_anomes(bruto)
+        if n and (not alvo or n in alvo):
+            d["_norm_anomes"] = n
+            filtrados.append(d)
+
+    if not filtrados:
+        raise HTTPException(404, "Nenhum documento encontrado para os parâmetros informados.")
+
+    filtrados.sort(key=lambda x: x["_norm_anomes"], reverse=True)
+
+    return {
+        "total_bruto": len(documentos_total),
+        "meses_solicitados": sorted(alvo, reverse=True) if alvo else [],
+        "total_encontrado": len(filtrados),
+        "documentos": filtrados,
+    }
