@@ -62,90 +62,6 @@ def registrar_usuario(
 
     return pessoa
 
-# @router.post("/user/register_colab", response_model=ColabResponse)
-# def registrar_colaborador(payload: CadastroColaborador, db: Session = Depends(get_db)):
-#     if db.query(Usuario).filter(Usuario.email == payload.usuario.email).first():
-#         raise HTTPException(status_code=400, detail="Email já cadastrado")
-
-#     colab = Pessoa(**payload.pessoa.dict())  # centro_de_custo, cliente, matricula já incluídos
-#     db.add(colab)
-#     db.commit()
-#     db.refresh(colab)
-
-#     try:
-#         usuario = Usuario(
-#             id_pessoa=colab.id,
-#             email=payload.usuario.email,
-#             senha=gerar_hash_senha(payload.usuario.senha)
-#         )
-#         db.add(usuario)
-#         db.commit()
-#     except Exception:
-#         db.rollback()
-#         raise HTTPException(status_code=500, detail="Erro ao salvar usuário")
-
-#     return ColabResponse(
-#         nome=colab.nome,
-#         cpf=colab.cpf,
-#         cliente=colab.cliente,
-#         centro_de_custo=colab.centro_de_custo,
-#         matricula=colab.matricula,
-#         email=usuario.email
-#     )
-
-# @router.post("/user/login", response_model=None, status_code=status.HTTP_200_OK)
-# def login(
-#     payload: UsuarioLogin,
-#     db: Session = Depends(get_db),
-# ):
-#     def is_email(valor: str) -> bool:
-#         return re.match(r"[^@]+@[^@]+\.[^@]+", valor) is not None
-
-#     if is_email(payload.usuario):
-#         usuario = db.query(Usuario).filter(Usuario.email == payload.usuario).first()
-#     else:
-#         pessoa = db.query(Pessoa).filter(Pessoa.cpf == payload.usuario).first()
-#         if not pessoa:
-#             raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
-#         usuario = db.query(Usuario).filter(Usuario.id_pessoa == pessoa.id).first()
-
-#     # CHANGED: verificação direta de igualdade, sem chamar verificar_senha()
-#     if not usuario or payload.senha != usuario.senha:
-#         raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
-
-#     access_token = criar_token(
-#         {"id": usuario.id_pessoa},
-#         expires_in=60 * 24 * 7
-#     )
-#     refresh_token = criar_token(
-#         {"id": usuario.id_pessoa},
-#         expires_in=60 * 24 * 30
-#     )
-#     response = JSONResponse(content={"message": "Login com sucesso"})
-#     response.set_cookie(
-#         "access_token",
-#         access_token,
-#         httponly=True,
-#         path="/",
-#         max_age=60 * 60 * 24 * 7,
-#     )
-#     response.set_cookie(
-#         "refresh_token",
-#         refresh_token,
-#         httponly=True,
-#         path="/",
-#         max_age=60 * 60 * 24 * 30,
-#     )
-#     response.set_cookie(
-#         "logged_user",
-#         "true",
-#         httponly=False,
-#         path="/",
-#         max_age=60 * 60 * 24 * 7,
-#     )
-
-#     return response
-
 @router.post(
     "/user/login",
     response_model=None,
@@ -167,10 +83,6 @@ def login_user(
         if not pessoa:
             raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
         usuario = db.query(Usuario).filter(Usuario.id_pessoa == pessoa.id).first()
-
-    # agora verifica a senha corretamente contra o hash
-    # if not usuario or not verificar_senha(payload.senha, usuario.senha):
-    #     raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
 
     if not usuario or not payload.senha == usuario.senha:
         raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
@@ -201,44 +113,6 @@ def login_user(
     )
 
     return response
-
-# @router.get("/user/me", response_model=PessoaResponse)
-# def get_me(request: Request, db: Session = Depends(get_db)):
-#     access_token = request.cookies.get("access_token")
-#     if not access_token:
-#         raise HTTPException(status_code=401, detail="Token de autenticação ausente")
-
-#     payload = verificar_token(access_token)
-#     if not payload:
-#         raise HTTPException(status_code=401, detail="Token inválido")
-
-#     jti = payload.get("jti")
-#     if not jti:
-#         raise HTTPException(status_code=401, detail="Token sem identificador único (jti)")
-
-#     if db.query(TokenBlacklist).filter_by(jti=jti).first():
-#         raise HTTPException(status_code=401, detail="Token expirado ou inválido")
-
-#     pessoa_id = payload.get("id")
-#     pessoa = db.query(Pessoa).filter(Pessoa.id == pessoa_id).first()
-
-#     if not pessoa:
-#         raise HTTPException(status_code=401, detail="Pessoa não encontrada")
-
-#     usuario = db.query(Usuario).filter(Usuario.id_pessoa == pessoa.id).first()
-
-#     if not usuario:
-#         raise HTTPException(status_code=404, detail="Usuário não encontrado")
-
-#     return PessoaResponse(
-#         nome=pessoa.nome,
-#         cpf=pessoa.cpf,
-#         email=usuario.email,
-#         cliente=pessoa.cliente,
-#         centro_de_custo=pessoa.centro_de_custo,
-#         matricula=pessoa.matricula,
-#         gestor=pessoa.gestor
-#     )
 
 @router.get("/user/me", response_model=PessoaResponse)
 def get_me(request: Request, db: Session = Depends(get_db)):
@@ -286,15 +160,12 @@ def get_me(request: Request, db: Session = Depends(get_db)):
         for row in rows
     ]
 
-    # Se quiser garantir que a matrícula armazenada na tabela Pessoa também apareça:
-    # (apenas se existir cliente associado em Pessoa; caso contrário, você pode pular)
-    # Ex.: forçar inclusão manual
     if getattr(pessoa, "matricula", None) and getattr(pessoa, "cliente", None):
         mat_pessoa = str(pessoa.matricula).strip()
         cli_pessoa = str(pessoa.cliente).strip()
         if mat_pessoa and cli_pessoa and all(not (d.id == cli_pessoa and d.matricula == mat_pessoa) for d in dados):
             dados.insert(0, DadoItem(id=cli_pessoa, nome=None, matricula=mat_pessoa))
-        
+
     return PessoaResponse(
         nome=pessoa.nome,
         cpf=str(pessoa.cpf),
