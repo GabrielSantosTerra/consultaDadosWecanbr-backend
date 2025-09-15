@@ -12,7 +12,7 @@ from app.database.connection import get_db
 from config.settings import settings
 from typing import List
 import base64
-from fpdf import FPDF
+from fpdf import FPDF # type: ignore
 
 router = APIRouter()
 
