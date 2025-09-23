@@ -1,14 +1,21 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
-from typing import List
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import text
+from typing import List, Optional
+import base64
+import binascii
+import requests
+import re
+import ipaddress
 
 from app.database.connection import get_db
-from app.schemas.document import TipoDocumentoResponse
-from app.models.document import TipoDocumento
+from app.schemas.document import TipoDocumentoResponse, StatusDocCreate, StatusDocOut
+from app.models.document import TipoDocumento, StatusDocumento
 from config.settings import settings
 from app.utils.jwt_handler import verificar_token
 from app.schemas.document import DeletarDocumentosRequest, DeletarDocumentosResponse
-import requests
+
 
 router = APIRouter()
 
@@ -34,6 +41,37 @@ def login(conta: str, usuario: str, senha: str) -> str:
         raise HTTPException(status_code=401, detail="Login falhou")
 
     return data["authorization_key"]
+
+
+def _extract_base64(raw: str) -> str:
+    """Suporta tanto 'AAAA...' quanto 'data:...;base64,AAAA...'."""
+    if not raw:
+        return ""
+    m = re.match(r"^data:.*?;base64,(.*)$", raw, flags=re.IGNORECASE | re.DOTALL)
+    return m.group(1) if m else raw
+
+def _sanitize_ip(ip_raw: Optional[str]) -> str:
+    """Normaliza e valida IPv4/IPv6 para coluna INET; se inválido, usa 0.0.0.0."""
+    if not ip_raw:
+        return "0.0.0.0"
+    ip = ip_raw.strip()
+    if "," in ip:  # X-Forwarded-For pode trazer lista
+        ip = ip.split(",")[0].strip()
+    # IPv4 com porta (1.2.3.4:12345)
+    if ":" in ip and ip.count(":") == 1 and re.match(r"^\d{1,3}(\.\d{1,3}){3}:\d+$", ip):
+        ip = ip.split(":")[0]
+    # IPv6 com colchetes
+    ip = ip.strip("[]")
+    try:
+        ipaddress.ip_address(ip)
+        return ip
+    except ValueError:
+        return "0.0.0.0"
+
+def _get_client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for")
+    return _sanitize_ip(xff if xff else (request.client.host if request.client else None))
+
 
 @router.get("/documents", response_model=List[TipoDocumentoResponse])
 def listar_tipos_documentos(request: Request, db: Session = Depends(get_db)):
@@ -133,3 +171,46 @@ def deletar_documentos_por_query(payload: DeletarDocumentosRequest):
         "total_deletados": deletados,
         "falhas": erros
     }
+
+@router.post(
+    "/status-doc",
+    response_model=StatusDocOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Grava aceite e arquivo (sem autenticação)",
+)
+def criar_status_doc(payload: StatusDocCreate, request: Request, db: Session = Depends(get_db)):
+    try:
+        b64 = _extract_base64(payload.base64)
+        arquivo_bytes = base64.b64decode(b64, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="base64 inválido")
+
+    ip = _get_client_ip(request)
+
+    registro = StatusDocumento(
+        aceito=payload.aceito,
+        ip_usuario=ip,
+        tipo_doc=payload.tipo_doc,
+        cpf=payload.cpf,
+        matricula=payload.matricula,
+        unidade=payload.unidade,
+        competencia=payload.competencia,
+        arquivo=arquivo_bytes,
+    )
+    try:
+        db.add(registro)
+        db.commit()
+        db.refresh(registro)
+
+        ok = db.execute(text("SELECT 1 FROM tb_status_doc WHERE id = :id"), {"id": registro.id}).scalar()
+        if not ok:
+            sch = db.execute(text("SELECT current_schema() AS sch")).first()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Commit efetuado, mas não encontrei id={registro.id} em tb_status_doc (schema={sch.sch}). "
+                       f"Verifique search_path/schema do model e onde você está consultando."
+            )
+        return registro
+    except SQLAlchemyError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao gravar no banco: {getattr(e, 'orig', e)}")
