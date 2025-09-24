@@ -43,4 +43,7 @@ class StatusDocOut(BaseModel):
     unidade: Optional[str] = None
     competencia: Optional[str] = None
 
+class StatusDocOutWithFile(StatusDocOut):
+    base64: Optional[str] = None
+
     model_config = ConfigDict(from_attributes=True)

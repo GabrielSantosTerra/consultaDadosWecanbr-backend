@@ -10,7 +10,7 @@ import re
 import ipaddress
 
 from app.database.connection import get_db
-from app.schemas.document import TipoDocumentoResponse, StatusDocCreate, StatusDocOut
+from app.schemas.document import TipoDocumentoResponse, StatusDocCreate, StatusDocOut, StatusDocOutWithFile
 from app.models.document import TipoDocumento, StatusDocumento
 from config.settings import settings
 from app.utils.jwt_handler import verificar_token
@@ -72,6 +72,29 @@ def _get_client_ip(request: Request) -> str:
     xff = request.headers.get("x-forwarded-for")
     return _sanitize_ip(xff if xff else (request.client.host if request.client else None))
 
+def _to_str_date(v) -> str:
+    # v é datetime.date
+    return v.isoformat() if v is not None else None
+
+def _to_str_time(v) -> str:
+    # v é datetime.time
+    return v.strftime("%H:%M:%S") if v is not None else None
+
+def _record_to_out(obj: StatusDocumento) -> StatusDocOutWithFile:
+    b64 = base64.b64encode(obj.arquivo).decode("utf-8") if obj.arquivo else None
+    return StatusDocOutWithFile(
+        id=obj.id,
+        aceito=bool(obj.aceito),
+        ip_usuario=str(obj.ip_usuario),
+        tipo_doc=str(obj.tipo_doc),
+        data=_to_str_date(obj.data),
+        hora=_to_str_time(obj.hora),
+        cpf=(obj.cpf if obj.cpf is not None else None),
+        matricula=(obj.matricula if obj.matricula is not None else None),
+        unidade=(obj.unidade if obj.unidade is not None else None),
+        competencia=(obj.competencia if obj.competencia is not None else None),
+        base64=b64,
+    )
 
 @router.get("/documents", response_model=List[TipoDocumentoResponse])
 def listar_tipos_documentos(request: Request, db: Session = Depends(get_db)):
@@ -206,3 +229,14 @@ def criar_status_doc(payload: StatusDocCreate, request: Request, db: Session = D
     except SQLAlchemyError as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erro ao gravar no banco: {getattr(e, 'orig', e)}")
+
+@router.get(
+    "/status-doc/{id}",
+    response_model=StatusDocOutWithFile,
+    summary="Obtém um registro por ID com arquivo em Base64",
+)
+def get_status_doc_by_id(id: int, db: Session = Depends(get_db)):
+    obj = db.get(StatusDocumento, id)
+    if not obj:
+        raise HTTPException(status_code=404, detail="Registro não encontrado")
+    return _record_to_out(obj)
