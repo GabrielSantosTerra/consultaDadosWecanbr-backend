@@ -202,14 +202,6 @@ def criar_status_doc(payload: StatusDocCreate, request: Request, db: Session = D
         db.commit()
         db.refresh(registro)
 
-        ok = db.execute(text("SELECT 1 FROM tb_status_doc WHERE id = :id"), {"id": registro.id}).scalar()
-        if not ok:
-            sch = db.execute(text("SELECT current_schema() AS sch")).first()
-            raise HTTPException(
-                status_code=500,
-                detail=f"Commit efetuado, mas não encontrei id={registro.id} em tb_status_doc (schema={sch.sch}). "
-                       f"Verifique search_path/schema do model e onde você está consultando."
-            )
         return registro
     except SQLAlchemyError as e:
         db.rollback()
