@@ -1,4 +1,5 @@
 import unicodedata
+import re
 from fastapi import APIRouter, HTTPException, Form, Depends, Request, Response, Body, Query
 from typing import Any, Dict, Optional, Set
 import requests
@@ -100,6 +101,10 @@ class UploadBase64Payload(BaseModel):
     documento_nome: str
     documento_base64: str
     campos: List[CampoConsulta]
+
+def _only_yyyymm(s: str) -> str:
+    """Mantém apenas dígitos e retorna os 6 primeiros (YYYYMM)."""
+    return re.sub(r"\D", "", (s or ""))[:6]
 
 def _normaliza_anomes(valor: str) -> Optional[str]:
     v = (valor or "").strip()
@@ -527,17 +532,112 @@ def buscar_holerite(
                 detail="Eventos não encontrados para o mesmo lote do cabeçalho/rodapé."
             )
 
+    # -------------------------------------------------------------
+    # <<< NOVO: ACEITO >>> (tb_satus_doc → fallback tb_status_doc)
+    # - Normaliza competencia do input para 'YYYYMM'
+    # - Se não houver coluna 'competencia' na tabela de aceite, deriva de 'data'
+    # - Retorna False quando não encontrado ou NULL
+    # -------------------------------------------------------------
+
+    comp_norm_input = _only_yyyymm(_normaliza_anomes(competencia) or competencia)
+
+    def _column_exists(schema: str, table: str, column: str) -> bool:
+        q = text("""
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = :schema
+              AND table_name   = :table
+              AND column_name  = :column
+            LIMIT 1
+        """)
+        return db.execute(q, {"schema": schema, "table": table, "column": column}).first() is not None
+
+    def _table_exists(schema: str, table: str) -> bool:
+        q = text("""
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = :schema
+              AND table_name   = :table
+            LIMIT 1
+        """)
+        return db.execute(q, {"schema": schema, "table": table}).first() is not None
+
+    # ajuste o schema se necessário (ex.: 'app_rh')
+    schema_status = "public"
+    table_try = "tb_satus_doc"   # com o "typo" que você tinha
+    table_fbk = "tb_status_doc"  # sem typo
+
+    # escolhe a tabela existente
+    table_name = None
+    if _table_exists(schema_status, table_try):
+        table_name = f'{schema_status}.{table_try}'
+    elif _table_exists(schema_status, table_fbk):
+        table_name = f'{schema_status}.{table_fbk}'
+
+    aceito_bool = False  # default
+
+    if table_name:
+        # checa colunas disponíveis
+        raw_table = table_name.split(".")[1]
+        has_comp = _column_exists(schema_status, raw_table, "competencia")
+        has_data = _column_exists(schema_status, raw_table, "data")
+        has_hora = _column_exists(schema_status, raw_table, "hora")
+
+        if has_comp:
+            comp_norm_expr = "regexp_replace(TRIM(sd.competencia), '[^0-9]', '', 'g')"
+        elif has_data:
+            comp_norm_expr = """
+                COALESCE(
+                    to_char(CASE
+                                WHEN sd.data ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+                                THEN to_date(sd.data, 'YYYY-MM-DD')
+                                ELSE NULL
+                            END, 'YYYYMM'),
+                    substr(regexp_replace(TRIM(sd.data), '[^0-9]', '', 'g'), 1, 6)
+                )
+            """
+        else:
+            comp_norm_expr = "NULL"
+
+        order_parts = ["sd.id DESC NULLS LAST"]
+        if has_data:
+            order_parts.append("sd.data DESC NULLS LAST")
+        if has_hora:
+            order_parts.append("sd.hora DESC NULLS LAST")
+        order_by_sql = ", ".join(order_parts)
+
+        sql_aceite = text(f"""
+            SELECT
+                (ARRAY_AGG(sd.aceito ORDER BY {order_by_sql}))[1] AS aceito
+            FROM {table_name} sd
+            WHERE TRIM(sd.cpf::text) = TRIM(:cpf)
+              AND TRIM(sd.matricula::text) = TRIM(:matricula)
+              AND {comp_norm_expr} = :comp_norm
+        """)
+
+        try:
+            val = db.execute(sql_aceite, {
+                "cpf": cpf,
+                "matricula": matricula,
+                "comp_norm": comp_norm_input
+            }).scalar()
+            aceito_bool = bool(val) if val is not None else False
+        except Exception:
+            db.rollback()
+            aceito_bool = False
+
+    # --------- resposta final ----------
     return {
         "tipo": "holerite",
         "competencia_utilizada": competencia,
         "empresa_utilizada": (cabecalho.get("cliente") if cabecalho else None),
         "cliente_nome_utilizado": (cabecalho.get("cliente_nome") if cabecalho else None),
         "matricula_utilizada": matricula,
+        "aceito": aceito_bool,  # <<< NOVO: sempre bool (False quando não encontrado/NULL)
         "cabecalho": cabecalho,
         "eventos": eventos,
         "rodape": rodape
     }
-
 def pad_left(valor: str, width: int) -> str:
     return str(valor).strip().zfill(width)
 
@@ -837,7 +937,6 @@ def buscar_search_documentos(payload: SearchDocumentosRequest, db: Session = Dep
     if not matricula_val:
         raise HTTPException(422, "Informe 'matricula' em cp[] para a chave composta.")
 
-    # campo colaborador é obrigatório para essa estratégia (não existe 'cpf' no template)
     norm_map = {_norm(n): i for i, n in enumerate(nomes_campos)}
     idx_colaborador = norm_map.get(_norm("colaborador"))
     if idx_colaborador is None:
@@ -847,7 +946,6 @@ def buscar_search_documentos(payload: SearchDocumentosRequest, db: Session = Dep
             f"Campos do template: [{_campos_template_txt()}]."
         )
 
-    # extrai CPF do valor enviado no campo colaborador (pode ser 'NOME_04258297232' ou só '04258297232')
     colaborador_original = (lista_cp[idx_colaborador] or "").strip()
     cpf_extraido = _cpf_from_any(colaborador_original)
     if not cpf_extraido:
@@ -857,7 +955,6 @@ def buscar_search_documentos(payload: SearchDocumentosRequest, db: Session = Dep
             "Envie 'colaborador' como 'NOME_99999999999' ou apenas os 11 dígitos do CPF."
         )
 
-    # >>> ALTERAÇÃO PRINCIPAL: força LIKE no colaborador: %CPF%
     lista_cp[idx_colaborador] = f"%{cpf_extraido}%"
 
     # 5) se não informar anomes/anomes_in → lista meses por tipodedoc+matricula
@@ -900,7 +997,6 @@ def buscar_search_documentos(payload: SearchDocumentosRequest, db: Session = Dep
                 return {"anomes": meses_sorted_objs}
 
         except (requests.HTTPError, requests.RequestException, RuntimeError):
-            # fallback: tenta pegar meses pelo search com LIKE já posicionado em 'colaborador'
             meses_norm = _coleta_anomes_via_search(
                 headers=headers,
                 id_template=payload.id_template,
@@ -945,14 +1041,12 @@ def buscar_search_documentos(payload: SearchDocumentosRequest, db: Session = Dep
         r.raise_for_status()
         data = r.json() or {}
         if data.get("error"):
-            # mensagem de erro do GED fica preservada aqui
             raise HTTPException(500, f"GED erro (search): {data.get('message')}")
         return [_flatten_attributes(doc) for doc in (data.get("documents") or [])]
 
     try:
         documentos_total = _do_search()
     except requests.HTTPError as err:
-        # repassa com detalhe do backend GED
         try:
             raise HTTPException(err.response.status_code, f"GED erro: {err.response.json()}")
         except Exception:
@@ -960,7 +1054,7 @@ def buscar_search_documentos(payload: SearchDocumentosRequest, db: Session = Dep
     except requests.RequestException as e:
         raise HTTPException(502, f"Falha ao consultar GED (search): {e}")
 
-    # 8) pós-processa e aplica filtro por meses (se houver)
+    # 8) pós-processa e aplica filtro por meses
     filtrados: List[Dict[str, Any]] = []
     for d in documentos_total:
         bruto = str(d.get(payload.campo_anomes, "")).strip()
@@ -973,6 +1067,93 @@ def buscar_search_documentos(payload: SearchDocumentosRequest, db: Session = Dep
         raise HTTPException(404, "Nenhum documento encontrado para os parâmetros informados.")
 
     filtrados.sort(key=lambda x: x["_norm_anomes"], reverse=True)
+
+    # 9) <<< NOVO: calcular 'aceito' por documento (cpf + matricula + competencia YYYYMM)
+    def __table_exists(schema: str, table: str) -> bool:
+        q = text("""
+            SELECT 1 FROM information_schema.tables
+             WHERE table_schema = :schema AND table_name = :table
+            LIMIT 1
+        """)
+        return db.execute(q, {"schema": schema, "table": table}).first() is not None
+
+    def __column_exists(schema: str, table: str, column: str) -> bool:
+        q = text("""
+            SELECT 1 FROM information_schema.columns
+             WHERE table_schema = :schema AND table_name = :table AND column_name = :column
+            LIMIT 1
+        """)
+        return db.execute(q, {"schema": schema, "table": table, "column": column}).first() is not None
+
+    schema_status = "public"
+    table_try = "tb_satus_doc"
+    table_fbk = "tb_status_doc"
+    table_name: Optional[str] = None
+    if __table_exists(schema_status, table_try):
+        table_name = f"{schema_status}.{table_try}"
+    elif __table_exists(schema_status, table_fbk):
+        table_name = f"{schema_status}.{table_fbk}"
+
+    aceito_cache: Dict[str, bool] = {}
+
+    def _aceito_for_comp(comp_norm_input: str) -> bool:
+        if not table_name:
+            return False
+        raw_table = table_name.split(".")[1]
+        has_comp = __column_exists(schema_status, raw_table, "competencia")
+        has_data = __column_exists(schema_status, raw_table, "data")
+        has_hora = __column_exists(schema_status, raw_table, "hora")
+
+        if has_comp:
+            comp_norm_expr = "regexp_replace(TRIM(sd.competencia), '[^0-9]', '', 'g')"
+        elif has_data:
+            comp_norm_expr = """
+                COALESCE(
+                    to_char(CASE
+                                WHEN sd.data ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+                                THEN to_date(sd.data, 'YYYY-MM-DD')
+                                ELSE NULL
+                            END, 'YYYYMM'),
+                    substr(regexp_replace(TRIM(sd.data), '[^0-9]', '', 'g'), 1, 6)
+                )
+            """
+        else:
+            comp_norm_expr = "NULL"
+
+        order_parts = ["sd.id DESC NULLS LAST"]
+        if has_data:
+            order_parts.append("sd.data DESC NULLS LAST")
+        if has_hora:
+            order_parts.append("sd.hora DESC NULLS LAST")
+        order_by_sql = ", ".join(order_parts)
+
+        sql_aceite = text(f"""
+            SELECT (ARRAY_AGG(sd.aceito ORDER BY {order_by_sql}))[1] AS aceito
+              FROM {table_name} sd
+             WHERE TRIM(sd.cpf::text) = TRIM(:cpf)
+               AND TRIM(sd.matricula::text) = TRIM(:matricula)
+               AND {comp_norm_expr} = :comp_norm
+        """)
+
+        try:
+            val = db.execute(sql_aceite, {
+                "cpf": cpf_extraido,
+                "matricula": matricula_val,
+                "comp_norm": comp_norm_input,
+            }).scalar()
+            return bool(val) if val is not None else False
+        except Exception:
+            db.rollback()
+            return False
+
+    # calcula aceito por mês (cacheando)
+    meses_unicos = {d["_norm_anomes"] for d in filtrados}
+    for m in meses_unicos:
+        aceito_cache[m] = _aceito_for_comp(m)
+
+    # anexa o campo 'aceito' a cada documento
+    for d in filtrados:
+        d["aceito"] = bool(aceito_cache.get(d["_norm_anomes"], False))
 
     return {
         "total_bruto": len(documentos_total),
