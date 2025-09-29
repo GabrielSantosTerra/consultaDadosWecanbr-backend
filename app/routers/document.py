@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from sqlalchemy import text
 from typing import List, Optional
 import base64
@@ -10,7 +10,7 @@ import re
 import ipaddress
 
 from app.database.connection import get_db
-from app.schemas.document import TipoDocumentoResponse, StatusDocCreate, StatusDocOut, StatusDocOutWithFile
+from app.schemas.document import TipoDocumentoResponse, StatusDocCreate, StatusDocOut, StatusDocOutWithFile, StatusDocQuery
 from app.models.document import TipoDocumento, StatusDocumento
 from config.settings import settings
 from app.utils.jwt_handler import verificar_token
@@ -202,11 +202,17 @@ def deletar_documentos_por_query(payload: DeletarDocumentosRequest):
     summary="Grava aceite e arquivo (sem autenticação)",
 )
 def criar_status_doc(payload: StatusDocCreate, request: Request, db: Session = Depends(get_db)):
+    # ✅ decodifica SEMPRE para bytes
     try:
         b64 = _extract_base64(payload.base64)
-        arquivo_bytes = base64.b64decode(b64, validate=True)
+        arquivo_bytes = base64.b64decode(b64, validate=True) if b64 else None
     except (binascii.Error, ValueError):
         raise HTTPException(status_code=400, detail="base64 inválido")
+
+    # ⚠️ Se por algum motivo vier string aqui, converte para bytes vazio
+    if isinstance(arquivo_bytes, str):
+        # Isso não deveria acontecer, mas garante que nunca passaremos str para BYTEA
+        arquivo_bytes = arquivo_bytes.encode("utf-8")
 
     ip = _get_client_ip(request)
 
@@ -218,25 +224,129 @@ def criar_status_doc(payload: StatusDocCreate, request: Request, db: Session = D
         matricula=payload.matricula,
         unidade=payload.unidade,
         competencia=payload.competencia,
-        arquivo=arquivo_bytes,
+        # ✅ aqui forçamos binário/memoryview para BYTEA
+        arquivo=(memoryview(arquivo_bytes) if arquivo_bytes is not None else None),
+        uuid=(payload.uuid or None),
     )
+
     try:
         db.add(registro)
         db.commit()
         db.refresh(registro)
-
-        return registro
+        return registro  # from_attributes=True no schema
     except SQLAlchemyError as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erro ao gravar no banco: {getattr(e, 'orig', e)}")
 
-@router.get(
-    "/status-doc/{id}",
-    response_model=StatusDocOutWithFile,
-    summary="Obtém um registro por ID com arquivo em Base64",
+@router.post(
+    "/status-doc",
+    response_model=StatusDocOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Grava aceite e arquivo (sem autenticação)",
 )
-def get_status_doc_by_id(id: int, db: Session = Depends(get_db)):
-    obj = db.get(StatusDocumento, id)
-    if not obj:
-        raise HTTPException(status_code=404, detail="Registro não encontrado")
-    return _record_to_out(obj)
+def criar_status_doc(payload: StatusDocCreate, request: Request, db: Session = Depends(get_db)):
+    # 1) decodifica base64 -> bytes
+    try:
+        b64 = _extract_base64(payload.base64)
+        arquivo_bytes = base64.b64decode(b64, validate=True) if b64 else None
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="base64 inválido")
+    if isinstance(arquivo_bytes, str):
+        arquivo_bytes = arquivo_bytes.encode("utf-8")
+
+    # 2) checa duplicidade de UUID (validação de aplicação)
+    if payload.uuid:
+        existente = (
+            db.query(StatusDocumento)
+              .filter(StatusDocumento.uuid == payload.uuid)
+              .first()
+        )
+        if existente:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Já existe um registro com este uuid ({payload.uuid})."
+            )
+
+    ip = _get_client_ip(request)
+
+    # 3) cria registro
+    registro = StatusDocumento(
+        aceito=payload.aceito,
+        ip_usuario=ip,
+        tipo_doc=payload.tipo_doc,
+        cpf=payload.cpf,
+        matricula=payload.matricula,
+        unidade=payload.unidade,
+        competencia=payload.competencia,
+        arquivo=(memoryview(arquivo_bytes) if arquivo_bytes is not None else None),
+        uuid=(payload.uuid or None),
+    )
+
+    # 4) persiste com proteção a corrida (constraint UNIQUE no banco)
+    try:
+        db.add(registro)
+        db.commit()
+        db.refresh(registro)
+        return _record_to_out(registro)
+    except IntegrityError:
+        db.rollback()
+        # Colisão concorrente ou outro caminho -> mantém mensagem 409
+        raise HTTPException(
+            status_code=409,
+            detail=f"Já existe um registro com este uuid ({payload.uuid})."
+        )
+    except SQLAlchemyError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao gravar no banco: {getattr(e, 'orig', e)}")
+
+
+# <<< ALTERAÇÃO: nova rota de consulta via payload (sem arquivo no retorno)
+@router.post(
+    "/status-doc/consultar",
+    response_model=StatusDocOut,
+    summary="Consulta status do documento via payload (prioriza UUID) — sem arquivo",
+)
+def consultar_status_doc(payload: StatusDocQuery, db: Session = Depends(get_db)):
+    # 1) Prioridade: UUID
+    if payload.uuid:
+        obj = (
+            db.query(StatusDocumento)
+              .filter(StatusDocumento.uuid == payload.uuid)
+              .order_by(StatusDocumento.id.desc())
+              .first()
+        )
+        if obj:
+            return _record_to_out(obj)
+
+    # 2) Fallback: ID
+    if payload.id is not None:
+        obj = db.get(StatusDocumento, payload.id)
+        if obj:
+            return _record_to_out(obj)
+
+    # 3) Fallback: cpf/matricula/competencia (competência normalizada)
+    if payload.cpf and payload.matricula and payload.competencia:
+        sql = text("""
+            SELECT sd.*
+              FROM app_rh.tb_status_doc sd
+             WHERE TRIM(sd.cpf::text) = TRIM(:cpf)
+               AND TRIM(sd.matricula::text) = TRIM(:matricula)
+               AND regexp_replace(TRIM(sd.competencia), '[^0-9]', '', 'g') =
+                   regexp_replace(TRIM(:competencia),  '[^0-9]', '', 'g')
+             ORDER BY sd.id DESC
+             LIMIT 1
+        """)
+        row = db.execute(sql, {
+            "cpf": payload.cpf,
+            "matricula": payload.matricula,
+            "competencia": payload.competencia
+        }).mappings().first()
+
+        if row:
+            obj = db.get(StatusDocumento, row["id"])
+            if obj:
+                return _record_to_out(obj)
+
+    # 4) Não achou
+    raise HTTPException(status_code=404, detail="Registro não encontrado para os critérios informados")
+

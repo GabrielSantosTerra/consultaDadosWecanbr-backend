@@ -30,20 +30,30 @@ class StatusDocCreate(BaseModel):
     cpf: str
     unidade: str
     competencia: str
+    uuid: Optional[str] = None  # ➜ garantir que existe
 
 class StatusDocOut(BaseModel):
     id: int
     aceito: bool
     ip_usuario: str
     tipo_doc: str
-    data: date          # <<< agora é date
-    hora: time          # <<< agora é time
+    data: date
+    hora: time
     cpf: Optional[str] = None
     matricula: Optional[str] = None
     unidade: Optional[str] = None
     competencia: Optional[str] = None
+    uuid: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
 
 class StatusDocOutWithFile(StatusDocOut):
     base64: Optional[str] = None
-
     model_config = ConfigDict(from_attributes=True)
+
+class StatusDocQuery(BaseModel):
+    uuid: Optional[str] = None
+    id: Optional[int] = None
+    cpf: Optional[str] = None
+    matricula: Optional[str] = None
+    competencia: Optional[str] = None

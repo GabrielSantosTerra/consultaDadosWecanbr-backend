@@ -638,6 +638,7 @@ def buscar_holerite(
         "eventos": eventos,
         "rodape": rodape
     }
+
 def pad_left(valor: str, width: int) -> str:
     return str(valor).strip().zfill(width)
 
@@ -789,23 +790,31 @@ def gerar_recibo(cabecalho: dict, eventos: list[dict], rodape: dict, page_number
 
     return pdf.output(dest='S').encode('latin-1')
 
+
 @router.post("/documents/holerite/montar")
 def montar_holerite(
     payload: MontarHolerite,
     db: Session = Depends(get_db)
 ):
-    params = {"matricula": payload.matricula, "competencia": payload.competencia, "lote": payload.lote, "cpf": payload.cpf}
+    params = {
+        "matricula": payload.matricula,
+        "competencia": payload.competencia,
+        "lote": payload.lote,
+        "cpf": payload.cpf
+    }
 
+    # >>> ALTERAÇÃO: inclui uuid como texto <<<
     sql_cabecalho = text("""
         SELECT empresa, filial, empresa_nome, empresa_cnpj,
                cliente, cliente_nome, cliente_cnpj,
                matricula, nome, funcao_nome, admissao,
-               competencia, lote
+               competencia, lote,
+               uuid::text AS uuid
         FROM tb_holerite_cabecalhos
         WHERE matricula   = :matricula
           AND competencia = :competencia
-          AND lote = :lote
-          AND cpf = :cpf
+          AND lote        = :lote
+          AND cpf         = :cpf
     """)
     cab_res = db.execute(sql_cabecalho, params)
     cab_row = cab_res.first()
@@ -818,15 +827,15 @@ def montar_holerite(
         FROM tb_holerite_eventos
         WHERE matricula   = :matricula
           AND competencia = :competencia
-          AND lote = :lote
-          AND cpf = :cpf
+          AND lote        = :lote
+          AND cpf         = :cpf
         ORDER BY evento
     """)
     evt_res = db.execute(sql_eventos, params)
     eventos = [dict(zip(evt_res.keys(), row)) for row in evt_res.fetchall()]
 
     if not eventos:
-      return Response(status_code=204)
+        return Response(status_code=204)
 
     for evt in eventos:
         tipo = evt.get('tipo', '').upper()
@@ -843,8 +852,8 @@ def montar_holerite(
         FROM tb_holerite_rodapes
         WHERE matricula   = :matricula
           AND competencia = :competencia
-          AND lote = :lote
-          AND cpf = :cpf
+          AND lote        = :lote
+          AND cpf         = :cpf
     """)
     rod_res = db.execute(sql_rodape, params)
     rod_row = rod_res.first()
@@ -856,11 +865,13 @@ def montar_holerite(
     pdf_base64 = base64.b64encode(raw_pdf).decode("utf-8")
 
     return {
-        "cabecalho": cabecalho,
+        "uuid": cabecalho.get("uuid"),  # >>> AGORA VEM NO ROOT <<<
+        "cabecalho": cabecalho,         # (inclui uuid também aqui)
         "eventos": eventos,
         "rodape": rodape,
         "pdf_base64": pdf_base64
     }
+
 
 @router.post("/searchdocuments/download")
 def baixar_documento(payload: DownloadDocumentoPayload):
