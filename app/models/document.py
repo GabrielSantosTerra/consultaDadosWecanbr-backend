@@ -26,3 +26,4 @@ class StatusDocumento(Base):
     competencia = Column(Text, nullable=True)
     arquivo     = Column(BYTEA, nullable=True)
     uuid        = Column(PG_UUID(as_uuid=False), nullable=True, index=True)
+    id_ged      = Column(Text, nullable=True, index=True)

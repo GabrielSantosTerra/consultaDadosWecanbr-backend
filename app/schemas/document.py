@@ -31,6 +31,7 @@ class StatusDocCreate(BaseModel):
     unidade: str
     competencia: str
     uuid: Optional[str] = None  # ➜ garantir que existe
+    id_ged: Optional[str] = None  # ➜ garantir que existe
 
 class StatusDocOut(BaseModel):
     id: int
@@ -44,6 +45,7 @@ class StatusDocOut(BaseModel):
     unidade: Optional[str] = None
     competencia: Optional[str] = None
     uuid: Optional[str] = None
+    id_ged: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -57,3 +59,4 @@ class StatusDocQuery(BaseModel):
     cpf: Optional[str] = None
     matricula: Optional[str] = None
     competencia: Optional[str] = None
+    id_ged: Optional[str] = None

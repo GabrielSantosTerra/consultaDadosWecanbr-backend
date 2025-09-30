@@ -202,49 +202,6 @@ def deletar_documentos_por_query(payload: DeletarDocumentosRequest):
     summary="Grava aceite e arquivo (sem autenticação)",
 )
 def criar_status_doc(payload: StatusDocCreate, request: Request, db: Session = Depends(get_db)):
-    # ✅ decodifica SEMPRE para bytes
-    try:
-        b64 = _extract_base64(payload.base64)
-        arquivo_bytes = base64.b64decode(b64, validate=True) if b64 else None
-    except (binascii.Error, ValueError):
-        raise HTTPException(status_code=400, detail="base64 inválido")
-
-    # ⚠️ Se por algum motivo vier string aqui, converte para bytes vazio
-    if isinstance(arquivo_bytes, str):
-        # Isso não deveria acontecer, mas garante que nunca passaremos str para BYTEA
-        arquivo_bytes = arquivo_bytes.encode("utf-8")
-
-    ip = _get_client_ip(request)
-
-    registro = StatusDocumento(
-        aceito=payload.aceito,
-        ip_usuario=ip,
-        tipo_doc=payload.tipo_doc,
-        cpf=payload.cpf,
-        matricula=payload.matricula,
-        unidade=payload.unidade,
-        competencia=payload.competencia,
-        # ✅ aqui forçamos binário/memoryview para BYTEA
-        arquivo=(memoryview(arquivo_bytes) if arquivo_bytes is not None else None),
-        uuid=(payload.uuid or None),
-    )
-
-    try:
-        db.add(registro)
-        db.commit()
-        db.refresh(registro)
-        return registro  # from_attributes=True no schema
-    except SQLAlchemyError as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Erro ao gravar no banco: {getattr(e, 'orig', e)}")
-
-@router.post(
-    "/status-doc",
-    response_model=StatusDocOut,
-    status_code=status.HTTP_201_CREATED,
-    summary="Grava aceite e arquivo (sem autenticação)",
-)
-def criar_status_doc(payload: StatusDocCreate, request: Request, db: Session = Depends(get_db)):
     # 1) decodifica base64 -> bytes
     try:
         b64 = _extract_base64(payload.base64)
@@ -269,7 +226,7 @@ def criar_status_doc(payload: StatusDocCreate, request: Request, db: Session = D
 
     ip = _get_client_ip(request)
 
-    # 3) cria registro
+    # 3) cria registro (id_ged agora é TEXT)
     registro = StatusDocumento(
         aceito=payload.aceito,
         ip_usuario=ip,
@@ -280,9 +237,10 @@ def criar_status_doc(payload: StatusDocCreate, request: Request, db: Session = D
         competencia=payload.competencia,
         arquivo=(memoryview(arquivo_bytes) if arquivo_bytes is not None else None),
         uuid=(payload.uuid or None),
+        id_ged=(payload.id_ged or None),  # ✅ string opcional
     )
 
-    # 4) persiste com proteção a corrida (constraint UNIQUE no banco)
+    # 4) persiste com proteção a corrida (constraint UNIQUE no banco p/ uuid)
     try:
         db.add(registro)
         db.commit()
@@ -290,7 +248,6 @@ def criar_status_doc(payload: StatusDocCreate, request: Request, db: Session = D
         return _record_to_out(registro)
     except IntegrityError:
         db.rollback()
-        # Colisão concorrente ou outro caminho -> mantém mensagem 409
         raise HTTPException(
             status_code=409,
             detail=f"Já existe um registro com este uuid ({payload.uuid})."
@@ -298,7 +255,6 @@ def criar_status_doc(payload: StatusDocCreate, request: Request, db: Session = D
     except SQLAlchemyError as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erro ao gravar no banco: {getattr(e, 'orig', e)}")
-
 
 # <<< ALTERAÇÃO: nova rota de consulta via payload (sem arquivo no retorno)
 @router.post(
@@ -318,13 +274,24 @@ def consultar_status_doc(payload: StatusDocQuery, db: Session = Depends(get_db))
         if obj:
             return _record_to_out(obj)
 
-    # 2) Fallback: ID
+    # 2) Fallback: ID_GED (novo)
+    if payload.id_ged:
+        obj = (
+            db.query(StatusDocumento)
+              .filter(StatusDocumento.id_ged == payload.id_ged)
+              .order_by(StatusDocumento.id.desc())
+              .first()
+        )
+        if obj:
+            return _record_to_out(obj)
+
+    # 3) Fallback: ID
     if payload.id is not None:
         obj = db.get(StatusDocumento, payload.id)
         if obj:
             return _record_to_out(obj)
 
-    # 3) Fallback: cpf/matricula/competencia (competência normalizada)
+    # 4) Fallback: cpf/matricula/competencia (competência normalizada)
     if payload.cpf and payload.matricula and payload.competencia:
         sql = text("""
             SELECT sd.*
@@ -347,6 +314,6 @@ def consultar_status_doc(payload: StatusDocQuery, db: Session = Depends(get_db))
             if obj:
                 return _record_to_out(obj)
 
-    # 4) Não achou
+    # 5) Não achou
     raise HTTPException(status_code=404, detail="Registro não encontrado para os critérios informados")
 
