@@ -8,8 +8,10 @@ import binascii
 import requests
 import re
 import ipaddress
+from sqlalchemy import or_
 
 from app.database.connection import get_db
+from app.models.user import Pessoa
 from app.schemas.document import TipoDocumentoResponse, StatusDocCreate, StatusDocOut, StatusDocOutWithFile, StatusDocQuery
 from app.models.document import TipoDocumento, StatusDocumento
 from config.settings import settings
@@ -106,7 +108,33 @@ def listar_tipos_documentos(request: Request, db: Session = Depends(get_db)):
     if not payload:
         raise HTTPException(status_code=401, detail="Token inválido")
 
-    documentos = db.query(TipoDocumento).all()
+    pessoa_id = payload.get("id")
+    pessoa = db.query(Pessoa).filter(Pessoa.id == pessoa_id).first()
+    if not pessoa:
+        raise HTTPException(status_code=401, detail="Pessoa não encontrada")
+
+    cliente = str(getattr(pessoa, "cliente", "")).strip()
+
+    query = db.query(TipoDocumento)
+
+    if cliente == "5849":
+        # Cliente 5849 (Sapore): Holerite + Recibo VT + Recibo VA
+        documentos = query.filter(
+            or_(
+                TipoDocumento.nome.ilike("%holerite%"),
+                TipoDocumento.nome.ilike("%recibo vt%"),
+                TipoDocumento.nome.ilike("%recibo va%"),
+            )
+        ).all()
+    else:
+        # Outros clientes: Benefício + Holerite
+        documentos = query.filter(
+            or_(
+                TipoDocumento.nome.ilike("%benef%"),  # cobre beneficio / benefício
+                TipoDocumento.nome.ilike("%holerite%"),
+            )
+        ).all()
+
     return documentos
 
 @router.post("/documents/delete", response_model=DeletarDocumentosResponse)
