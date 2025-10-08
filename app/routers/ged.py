@@ -1247,3 +1247,67 @@ def buscar_beneficios(payload: dict = Body(...), db: Session = Depends(get_db)):
         "cabeçalho": cabecalho,
         "beneficios": beneficios
     }
+
+@router.post("/documents/beneficios/competencias")
+async def listar_competencias_beneficios(
+    request: Request,
+    cpf: Optional[str] = Query(None),
+    matricula: Optional[str] = Query(None),
+    cliente: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    """
+    Lista competências (ano, mes) disponíveis em tb_beneficio_eventos
+    para a chave (cpf, matricula) e, opcionalmente, cliente (código).
+    """
+
+    # Fallback: tentar ler do body JSON se não vier via querystring
+    if not cpf or not matricula:
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                cpf = cpf or body.get("cpf")
+                matricula = matricula or body.get("matricula")
+                cliente = cliente or body.get("cliente")
+        except Exception:
+            pass  # body ausente ou inválido
+
+    if not cpf or not matricula:
+        raise HTTPException(
+            status_code=422,
+            detail="Informe 'cpf' e 'matricula' (na querystring ou no body JSON)."
+        )
+
+    params: Dict[str, Any] = {
+        "cpf": str(cpf).strip(),
+        "matricula": str(matricula).strip(),
+    }
+
+    f_cli = ""
+    if cliente:
+        f_cli = " AND TRIM(cliente::text) = TRIM(:cliente) "
+        params["cliente"] = str(cliente).strip()
+
+    # Consulta distinta das competências normalizadas
+    sql_lista_comp = text(f"""
+        SELECT DISTINCT
+               regexp_replace(TRIM(competencia), '[^0-9]', '', 'g') AS comp
+          FROM tb_beneficio_eventos
+         WHERE TRIM(cpf::text) = TRIM(:cpf)
+           AND TRIM(matricula::text) = TRIM(:matricula)
+           {f_cli}
+           AND competencia IS NOT NULL
+           AND regexp_replace(TRIM(competencia), '[^0-9]', '', 'g') ~ '^[0-9]{{6}}$'
+         ORDER BY comp DESC
+    """)
+
+    rows = db.execute(sql_lista_comp, params).fetchall()
+    competencias = [
+        {"ano": int(r[0][:4]), "mes": int(r[0][4:6])}
+        for r in rows if r[0] and len(r[0]) == 6
+    ]
+
+    if not competencias:
+        raise HTTPException(status_code=404, detail="Nenhuma competência encontrada para os parâmetros informados.")
+
+    return {"competencias": competencias}
