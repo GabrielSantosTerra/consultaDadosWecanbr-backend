@@ -288,10 +288,26 @@ def criar_status_doc(payload: StatusDocCreate, request: Request, db: Session = D
 @router.post(
     "/status-doc/consultar",
     response_model=StatusDocOut,
-    summary="Consulta status do documento via payload (prioriza UUID) — sem arquivo",
+    summary="Consulta status do documento via payload (prioriza UUID + tipo_doc) — sem arquivo",
 )
 def consultar_status_doc(payload: StatusDocQuery, db: Session = Depends(get_db)):
-    # 1) Prioridade: UUID
+    # 1) Prioridade: UUID + tipo_doc
+    if payload.uuid and payload.tipo_doc:
+        sql = text("""
+            SELECT sd.*
+              FROM app_rh.tb_status_doc sd
+             WHERE TRIM(sd.uuid::text) = TRIM(:uuid)
+               AND LOWER(TRIM(sd.tipo_doc)) = LOWER(TRIM(:tipo_doc))
+             ORDER BY sd.id DESC
+             LIMIT 1
+        """)
+        row = db.execute(sql, {"uuid": payload.uuid, "tipo_doc": payload.tipo_doc}).mappings().first()
+        if row:
+            obj = db.get(StatusDocumento, row["id"])
+            if obj:
+                return _record_to_out(obj)
+
+    # 2) Fallback: UUID isolado
     if payload.uuid:
         obj = (
             db.query(StatusDocumento)
@@ -302,7 +318,7 @@ def consultar_status_doc(payload: StatusDocQuery, db: Session = Depends(get_db))
         if obj:
             return _record_to_out(obj)
 
-    # 2) Fallback: ID_GED (novo)
+    # 3) Fallback: ID_GED
     if payload.id_ged:
         obj = (
             db.query(StatusDocumento)
@@ -313,13 +329,13 @@ def consultar_status_doc(payload: StatusDocQuery, db: Session = Depends(get_db))
         if obj:
             return _record_to_out(obj)
 
-    # 3) Fallback: ID
+    # 4) Fallback: ID
     if payload.id is not None:
         obj = db.get(StatusDocumento, payload.id)
         if obj:
             return _record_to_out(obj)
 
-    # 4) Fallback: cpf/matricula/competencia (competência normalizada)
+    # 5) Fallback: cpf/matricula/competencia
     if payload.cpf and payload.matricula and payload.competencia:
         sql = text("""
             SELECT sd.*
@@ -342,6 +358,7 @@ def consultar_status_doc(payload: StatusDocQuery, db: Session = Depends(get_db))
             if obj:
                 return _record_to_out(obj)
 
-    # 5) Não achou
+    # 6) Não achou
     raise HTTPException(status_code=404, detail="Registro não encontrado para os critérios informados")
+
 

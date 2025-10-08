@@ -55,6 +55,7 @@ class StatusDocOutWithFile(StatusDocOut):
 
 class StatusDocQuery(BaseModel):
     uuid: Optional[str] = None
+    tipo_doc: Optional[str] = None
     id: Optional[int] = None
     cpf: Optional[str] = None
     matricula: Optional[str] = None
