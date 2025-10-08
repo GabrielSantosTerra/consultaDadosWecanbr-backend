@@ -1172,3 +1172,78 @@ def buscar_search_documentos(payload: SearchDocumentosRequest, db: Session = Dep
         "total_encontrado": len(filtrados),
         "documentos": filtrados,
     }
+
+@router.post("/documents/beneficios/buscar")
+def buscar_beneficios(payload: dict = Body(...), db: Session = Depends(get_db)):
+    cpf = (payload.get("cpf") or "").strip()
+    matricula = (payload.get("matricula") or "").strip()
+    competencia = (payload.get("competencia") or "").strip()
+
+    if not cpf or not matricula or not competencia:
+        raise HTTPException(status_code=422, detail="Informe cpf, matricula e competencia.")
+
+    filtro_comp = """
+        regexp_replace(TRIM(competencia), '[^0-9]', '', 'g') =
+        regexp_replace(TRIM(:competencia), '[^0-9]', '', 'g')
+    """
+
+    # --- Benefícios ---
+    sql_benef = text(f"""
+        SELECT
+            empresa,
+            filial,
+            cliente,
+            matricula,
+            cpf,
+            competencia,
+            lote,
+            evento,
+            evento_nome,
+            referencia,
+            valor,
+            tipo
+        FROM public.tb_beneficio_eventos
+        WHERE TRIM(cpf::text) = TRIM(:cpf)
+          AND TRIM(matricula::text) = TRIM(:matricula)
+          AND {filtro_comp}
+        ORDER BY evento
+    """)
+    benef_rows = db.execute(sql_benef, {"cpf": cpf, "matricula": matricula, "competencia": competencia}).fetchall()
+    if not benef_rows:
+        raise HTTPException(status_code=404, detail="Nenhum benefício encontrado para os critérios informados.")
+    beneficios = [dict(r._mapping) for r in benef_rows]
+
+    # --- Cabeçalho ---
+    sql_cab = text(f"""
+        SELECT
+            empresa,
+            filial,
+            empresa_nome,
+            empresa_cnpj,
+            cliente,
+            cliente_nome,
+            cliente_cnpj,
+            matricula,
+            nome,
+            funcao_nome,
+            admissao,
+            competencia,
+            lote,
+            uuid::text AS uuid
+        FROM public.tb_holerite_cabecalhos
+        WHERE TRIM(cpf::text) = TRIM(:cpf)
+          AND TRIM(matricula::text) = TRIM(:matricula)
+          AND {filtro_comp}
+        ORDER BY lote DESC NULLS LAST
+        LIMIT 1
+    """)
+    cab_row = db.execute(sql_cab, {"cpf": cpf, "matricula": matricula, "competencia": competencia}).first()
+    cabecalho = dict(cab_row._mapping) if cab_row else None
+
+    return {
+        "cpf": cpf,
+        "matricula": matricula,
+        "competencia": competencia,
+        "cabeçalho": cabecalho,
+        "beneficios": beneficios
+    }
