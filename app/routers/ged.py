@@ -17,6 +17,13 @@ from fpdf import FPDF # type: ignore
 
 router = APIRouter()
 
+class MontarBeneficio(BaseModel):
+    matricula: str
+    competencia: str
+    cpf: str
+    lote_holerite: str
+    uuid: str
+
 class TemplateFieldsRequest(BaseModel):
     id_template: int
 
@@ -1311,3 +1318,124 @@ async def listar_competencias_beneficios(
         raise HTTPException(status_code=404, detail="Nenhuma competência encontrada para os parâmetros informados.")
 
     return {"competencias": competencias}
+
+@router.post("/documents/beneficios/montar")
+def montar_beneficio(
+    payload: MontarBeneficio,
+    db: Session = Depends(get_db)
+):
+    params_cab = {
+        "matricula": payload.matricula,
+        "competencia": payload.competencia,
+        "lote": payload.lote_holerite,
+        "cpf": payload.cpf
+    }
+
+    params_evt = {
+        "matricula": payload.matricula,
+        "competencia": payload.competencia,
+        "uuid": payload.uuid,
+        "cpf": payload.cpf
+    }
+
+    # --- Cabeçalho (usa lote do holerite) ---
+    sql_cabecalho = text("""
+        SELECT empresa, filial, empresa_nome, empresa_cnpj,
+               cliente, cliente_nome, cliente_cnpj,
+               matricula, nome, funcao_nome, admissao,
+               competencia, lote,
+               uuid::text AS uuid
+        FROM tb_holerite_cabecalhos
+        WHERE matricula   = :matricula
+          AND competencia = :competencia
+          AND lote        = :lote
+          AND cpf         = :cpf
+    """)
+    cab_res = db.execute(sql_cabecalho, params_cab)
+    cab_row = cab_res.first()
+    if not cab_row:
+        raise HTTPException(status_code=404, detail="Cabeçalho não encontrado (lote do holerite)")
+    cabecalho = dict(zip(cab_res.keys(), cab_row))
+
+    # --- Eventos (usa luuidote do benefício) ---
+    sql_eventos = text("""
+        SELECT evento, evento_nome, referencia, valor, tipo
+        FROM tb_beneficio_eventos
+        WHERE matricula   = :matricula
+          AND competencia = :competencia
+          AND uuid        = :uuid
+          AND cpf         = :cpf
+        ORDER BY evento
+    """)
+    evt_res = db.execute(sql_eventos, params_evt)
+    eventos = [dict(zip(evt_res.keys(), row)) for row in evt_res.fetchall()]
+
+    if not eventos:
+        raise HTTPException(status_code=404, detail="Nenhum evento de benefício encontrado (uuid do benefício)")
+
+    # Normaliza tipo
+    for evt in eventos:
+        tipo = evt.get("tipo", "").upper()
+        if tipo not in ("V", "D"):
+            tipo = "V"
+        evt["tipo"] = tipo
+
+    # --- Gera PDF (sem rodapé) ---
+    pdf = FPDF(format='A4', unit='mm')
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 6, "Recibo de Benefícios", ln=0)
+    pdf.ln(8)
+
+    pdf.set_font("Arial", '', 9)
+    pdf.cell(120, 5, f"Empresa: {cabecalho['empresa']} - {cabecalho['filial']} {cabecalho['empresa_nome']}", ln=0)
+    pdf.cell(0, 5, f"Nº Inscrição: {cabecalho['empresa_cnpj']}", ln=1, align='R')
+    pdf.cell(120, 5, f"Cliente: {cabecalho['cliente']} {cabecalho['cliente_nome']}", ln=0)
+    pdf.cell(0, 5, f"Nº Inscrição: {cabecalho['cliente_cnpj']}", ln=1, align='R')
+    pdf.ln(4)
+
+    pdf.set_font("Arial", 'B', 10)
+    pdf.cell(0, 6, f"Matrícula: {cabecalho['matricula']}   Nome: {cabecalho['nome']}", ln=1)
+    pdf.cell(0, 6, f"Competência: {cabecalho['competencia']}   Lote Holerite: {payload.lote_holerite}   Lote Benefício: {payload.uuid}", ln=1)
+    pdf.ln(4)
+
+    # Cabeçalho dos eventos
+    pdf.set_font("Arial", 'B', 9)
+    pdf.cell(25, 6, "Evento", border=1)
+    pdf.cell(90, 6, "Descrição", border=1)
+    pdf.cell(25, 6, "Referência", border=1, align='R')
+    pdf.cell(30, 6, "Valor", border=1, align='R')
+    pdf.ln(6)
+
+    pdf.set_font("Arial", '', 9)
+    total = 0.0
+    for evt in eventos:
+        valor = float(evt.get("valor") or 0)
+        total += valor
+        pdf.cell(25, 6, str(evt["evento"]), border=1)
+        pdf.cell(90, 6, evt["evento_nome"], border=1)
+        pdf.cell(25, 6, f"{evt['referencia']}", border=1, align='R')
+        pdf.cell(30, 6, f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."), border=1, align='R')
+        pdf.ln(6)
+
+    pdf.set_font("Arial", 'B', 10)
+    pdf.cell(140, 8, "Total de Benefícios", border=1, align='R')
+    pdf.cell(30, 8, f"{total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."), border=1, align='R')
+    pdf.ln(12)
+
+    pdf.set_font("Arial", '', 9)
+    pdf.cell(0, 6, "Assinatura: _________________________________________", ln=1)
+    pdf.ln(10)
+    pdf.cell(0, 6, "Data: ____/____/____", ln=1, align='R')
+
+    raw_pdf = pdf.output(dest='S').encode('latin-1')
+    pdf_base64 = base64.b64encode(raw_pdf).decode("utf-8")
+
+    return {
+        "uuid": cabecalho.get("uuid"),
+        "cabecalho": cabecalho,
+        "eventos": eventos,
+        "pdf_base64": pdf_base64
+    }
