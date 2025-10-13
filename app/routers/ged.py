@@ -1196,6 +1196,7 @@ def buscar_beneficios(payload: dict = Body(...), db: Session = Depends(get_db)):
     # --- Benefícios ---
     sql_benef = text(f"""
         SELECT
+            uuid::text AS uuid,
             empresa,
             filial,
             cliente,
@@ -1223,13 +1224,16 @@ def buscar_beneficios(payload: dict = Body(...), db: Session = Depends(get_db)):
 
     beneficios = [dict(r._mapping) for r in benef_rows]
 
+    # Pega o UUID do primeiro registro
+    uuid = beneficios[0].get("uuid") if beneficios else None
+
     return {
+        "uuid": uuid,
         "cpf": cpf,
         "matricula": matricula,
         "competencia": competencia,
         "beneficios": beneficios
     }
-
 
 @router.post("/documents/beneficios/competencias")
 async def listar_competencias_beneficios(
