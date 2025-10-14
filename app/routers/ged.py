@@ -402,11 +402,18 @@ async def listar_competencias_holerite(
 # ==========================================
 # ROTA SIMPLIFICADA: buscar holerite direto
 # ==========================================
+
 @router.post("/documents/holerite/buscar")
 def buscar_holerite(
     payload: BuscarHolerite = Body(...),
     db: Session = Depends(get_db),
 ):
+    """
+    ALTERAÇÕES:
+    - Agrupa eventos por tipo_calculo ('A' adiantamento, 'P' pagamento) e retorna em `documentos`.
+    - Mantém `eventos` no root (compat), priorizando `P`; se não houver, usa `A`.
+    - Restante da lógica (lote, cabeçalho, rodapé, aceite) preservada.
+    """
     cpf = (payload.cpf or "").strip()
     matricula = (payload.matricula or "").strip()
     competencia = (payload.competencia or "").strip()
@@ -423,7 +430,7 @@ def buscar_holerite(
 
     params_base = {"cpf": cpf, "matricula": matricula, "competencia": competencia}
 
-    # 1) Verifica eventos
+    # 1) Verifica eventos (qualquer tipo_calculo)
     sql_has_evt = text(f"""
         SELECT EXISTS(
             SELECT 1
@@ -437,7 +444,8 @@ def buscar_holerite(
     if not has_evt:
         raise HTTPException(status_code=404, detail="Nenhum evento de holerite encontrado para os critérios informados.")
 
-    # 2) Busca eventos
+    # 2) Busca eventos (aqui ainda sem filtrar o lote; manteremos o fluxo original)
+    #    Observação: como agora precisamos de 'tipo_calculo', usamos SELECT * assumindo que a coluna existe.
     sql_eventos = text(f"""
         SELECT *
         FROM tb_holerite_eventos e
@@ -539,13 +547,47 @@ def buscar_holerite(
                 detail="Eventos não encontrados para o mesmo lote do cabeçalho/rodapé."
             )
 
-    # -------------------------------------------------------------
-    # <<< NOVO: ACEITO >>> (tb_satus_doc → fallback tb_status_doc)
-    # - Normaliza competencia do input para 'YYYYMM'
-    # - Se não houver coluna 'competencia' na tabela de aceite, deriva de 'data'
-    # - Retorna False quando não encontrado ou NULL
-    # -------------------------------------------------------------
+    # ===== NOVO: separar por tipo_calculo (A/P) mantendo compatibilidade =====
+    # Ordena em Python priorizando 'A' depois 'P' (ajuste se quiser priorizar P primeiro)
+    def _ord_tc(tc: str) -> int:
+        tc = (tc or "").upper()
+        return 1 if tc == "A" else (2 if tc == "P" else 99)
 
+    try:
+        eventos_sorted = sorted(
+            eventos,
+            key=lambda e: (_ord_tc(e.get("tipo_calculo")), e.get("evento"))
+        )
+    except Exception:
+        eventos_sorted = eventos  # fallback se houver tipos mistos/None
+
+    grupos = {"A": [], "P": []}
+    for e in eventos_sorted:
+        tc = (e.get("tipo_calculo") or "").upper()
+        if tc in grupos:
+            grupos[tc].append(e)
+
+    # documentos: retorna blocos por tipo_calculo com descrição
+    documentos = []
+    if grupos["A"]:
+        documentos.append({
+            "tipo_calculo": "A",
+            "descricao": "Adiantamento",
+            "eventos": grupos["A"],
+        })
+    if grupos["P"]:
+        documentos.append({
+            "tipo_calculo": "P",
+            "descricao": "Pagamento",
+            "eventos": grupos["P"],
+        })
+
+    # Compat: root.eventos prioriza Pagamento (P); se não houver, usa Adiantamento (A)
+    eventos_root = grupos["P"] if grupos["P"] else grupos["A"] if grupos["A"] else eventos_sorted
+
+    # -------------------------------------------------------------
+    # ACEITO (tb_satus_doc → fallback tb_status_doc) - mantido
+    # -------------------------------------------------------------
     comp_norm_input = _only_yyyymm(_normaliza_anomes(competencia) or competencia)
 
     def _column_exists(schema: str, table: str, column: str) -> bool:
@@ -571,7 +613,7 @@ def buscar_holerite(
 
     # ajuste o schema se necessário (ex.: 'app_rh')
     schema_status = "public"
-    table_try = "tb_satus_doc"   # com o "typo" que você tinha
+    table_try = "tb_satus_doc"   # com o "typo"
     table_fbk = "tb_status_doc"  # sem typo
 
     # escolhe a tabela existente
@@ -640,10 +682,15 @@ def buscar_holerite(
         "empresa_utilizada": (cabecalho.get("cliente") if cabecalho else None),
         "cliente_nome_utilizado": (cabecalho.get("cliente_nome") if cabecalho else None),
         "matricula_utilizada": matricula,
-        "aceito": aceito_bool,  # <<< NOVO: sempre bool (False quando não encontrado/NULL)
+        "aceito": aceito_bool,  # bool (False quando não encontrado/NULL)
         "cabecalho": cabecalho,
-        "eventos": eventos,
-        "rodape": rodape
+        "rodape": rodape,
+
+        # NOVO: blocos separados por tipo_calculo
+        "documentos": documentos,
+
+        # compat: eventos do Pagamento (P) ou Adiantamento (A)
+        "eventos": eventos_root
     }
 
 def pad_left(valor: str, width: int) -> str:
@@ -805,7 +852,7 @@ def montar_holerite(
 ):
     params = {
         "matricula": payload.matricula,
-        "compet encia": payload.competencia,
+        "competencia": payload.competencia,
         "lote": payload.lote,
         "cpf": payload.cpf
     }
