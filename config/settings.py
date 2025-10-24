@@ -25,6 +25,16 @@ class Settings(BaseSettings):
 
     ENVIRONMENT: str
 
+    ODOO_URL: str
+    ODOO_DB: str
+    ODOO_USER: str
+    ODOO_PASSWORD: str
+    ODOO_HTTP_TIMEOUT: int = 20
+
+    HELPDESK_TEAM_ID: int
+
+    AUTO_TICKET_ON_CLOSE: bool = True
+
     class Config:
         env_file = ".env"
 
