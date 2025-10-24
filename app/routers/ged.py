@@ -17,6 +17,13 @@ from fpdf import FPDF # type: ignore
 
 router = APIRouter()
 
+class MontarBeneficio(BaseModel):
+    matricula: str
+    competencia: str
+    cpf: str
+    lote_holerite: str
+    uuid: str
+
 class TemplateFieldsRequest(BaseModel):
     id_template: int
 
@@ -395,11 +402,18 @@ async def listar_competencias_holerite(
 # ==========================================
 # ROTA SIMPLIFICADA: buscar holerite direto
 # ==========================================
+
 @router.post("/documents/holerite/buscar")
 def buscar_holerite(
     payload: BuscarHolerite = Body(...),
     db: Session = Depends(get_db),
 ):
+    """
+    ALTERAÇÕES:
+    - Agrupa eventos por tipo_calculo ('A' adiantamento, 'P' pagamento) e retorna em `documentos`.
+    - Mantém `eventos` no root (compat), priorizando `P`; se não houver, usa `A`.
+    - Restante da lógica (lote, cabeçalho, rodapé, aceite) preservada.
+    """
     cpf = (payload.cpf or "").strip()
     matricula = (payload.matricula or "").strip()
     competencia = (payload.competencia or "").strip()
@@ -416,7 +430,7 @@ def buscar_holerite(
 
     params_base = {"cpf": cpf, "matricula": matricula, "competencia": competencia}
 
-    # 1) Verifica eventos
+    # 1) Verifica eventos (qualquer tipo_calculo)
     sql_has_evt = text(f"""
         SELECT EXISTS(
             SELECT 1
@@ -430,7 +444,8 @@ def buscar_holerite(
     if not has_evt:
         raise HTTPException(status_code=404, detail="Nenhum evento de holerite encontrado para os critérios informados.")
 
-    # 2) Busca eventos
+    # 2) Busca eventos (aqui ainda sem filtrar o lote; manteremos o fluxo original)
+    #    Observação: como agora precisamos de 'tipo_calculo', usamos SELECT * assumindo que a coluna existe.
     sql_eventos = text(f"""
         SELECT *
         FROM tb_holerite_eventos e
@@ -532,13 +547,47 @@ def buscar_holerite(
                 detail="Eventos não encontrados para o mesmo lote do cabeçalho/rodapé."
             )
 
-    # -------------------------------------------------------------
-    # <<< NOVO: ACEITO >>> (tb_satus_doc → fallback tb_status_doc)
-    # - Normaliza competencia do input para 'YYYYMM'
-    # - Se não houver coluna 'competencia' na tabela de aceite, deriva de 'data'
-    # - Retorna False quando não encontrado ou NULL
-    # -------------------------------------------------------------
+    # ===== NOVO: separar por tipo_calculo (A/P) mantendo compatibilidade =====
+    # Ordena em Python priorizando 'A' depois 'P' (ajuste se quiser priorizar P primeiro)
+    def _ord_tc(tc: str) -> int:
+        tc = (tc or "").upper()
+        return 1 if tc == "A" else (2 if tc == "P" else 99)
 
+    try:
+        eventos_sorted = sorted(
+            eventos,
+            key=lambda e: (_ord_tc(e.get("tipo_calculo")), e.get("evento"))
+        )
+    except Exception:
+        eventos_sorted = eventos  # fallback se houver tipos mistos/None
+
+    grupos = {"A": [], "P": []}
+    for e in eventos_sorted:
+        tc = (e.get("tipo_calculo") or "").upper()
+        if tc in grupos:
+            grupos[tc].append(e)
+
+    # documentos: retorna blocos por tipo_calculo com descrição
+    documentos = []
+    if grupos["A"]:
+        documentos.append({
+            "tipo_calculo": "A",
+            "descricao": "Adiantamento",
+            "eventos": grupos["A"],
+        })
+    if grupos["P"]:
+        documentos.append({
+            "tipo_calculo": "P",
+            "descricao": "Pagamento",
+            "eventos": grupos["P"],
+        })
+
+    # Compat: root.eventos prioriza Pagamento (P); se não houver, usa Adiantamento (A)
+    eventos_root = grupos["P"] if grupos["P"] else grupos["A"] if grupos["A"] else eventos_sorted
+
+    # -------------------------------------------------------------
+    # ACEITO (tb_satus_doc → fallback tb_status_doc) - mantido
+    # -------------------------------------------------------------
     comp_norm_input = _only_yyyymm(_normaliza_anomes(competencia) or competencia)
 
     def _column_exists(schema: str, table: str, column: str) -> bool:
@@ -564,7 +613,7 @@ def buscar_holerite(
 
     # ajuste o schema se necessário (ex.: 'app_rh')
     schema_status = "public"
-    table_try = "tb_satus_doc"   # com o "typo" que você tinha
+    table_try = "tb_satus_doc"   # com o "typo"
     table_fbk = "tb_status_doc"  # sem typo
 
     # escolhe a tabela existente
@@ -633,10 +682,15 @@ def buscar_holerite(
         "empresa_utilizada": (cabecalho.get("cliente") if cabecalho else None),
         "cliente_nome_utilizado": (cabecalho.get("cliente_nome") if cabecalho else None),
         "matricula_utilizada": matricula,
-        "aceito": aceito_bool,  # <<< NOVO: sempre bool (False quando não encontrado/NULL)
+        "aceito": aceito_bool,  # bool (False quando não encontrado/NULL)
         "cabecalho": cabecalho,
-        "eventos": eventos,
-        "rodape": rodape
+        "rodape": rodape,
+
+        # NOVO: blocos separados por tipo_calculo
+        "documentos": documentos,
+
+        # compat: eventos do Pagamento (P) ou Adiantamento (A)
+        "eventos": eventos_root
     }
 
 def pad_left(valor: str, width: int) -> str:
@@ -871,7 +925,6 @@ def montar_holerite(
         "rodape": rodape,
         "pdf_base64": pdf_base64
     }
-
 
 @router.post("/searchdocuments/download")
 def baixar_documento(payload: DownloadDocumentoPayload):
@@ -1190,6 +1243,7 @@ def buscar_beneficios(payload: dict = Body(...), db: Session = Depends(get_db)):
     # --- Benefícios ---
     sql_benef = text(f"""
         SELECT
+            uuid::text AS uuid,
             empresa,
             filial,
             cliente,
@@ -1208,43 +1262,23 @@ def buscar_beneficios(payload: dict = Body(...), db: Session = Depends(get_db)):
           AND {filtro_comp}
         ORDER BY evento
     """)
-    benef_rows = db.execute(sql_benef, {"cpf": cpf, "matricula": matricula, "competencia": competencia}).fetchall()
+    benef_rows = db.execute(
+        sql_benef, {"cpf": cpf, "matricula": matricula, "competencia": competencia}
+    ).fetchall()
+
     if not benef_rows:
         raise HTTPException(status_code=404, detail="Nenhum benefício encontrado para os critérios informados.")
+
     beneficios = [dict(r._mapping) for r in benef_rows]
 
-    # --- Cabeçalho ---
-    sql_cab = text(f"""
-        SELECT
-            empresa,
-            filial,
-            empresa_nome,
-            empresa_cnpj,
-            cliente,
-            cliente_nome,
-            cliente_cnpj,
-            matricula,
-            nome,
-            funcao_nome,
-            admissao,
-            competencia,
-            lote,
-            uuid::text AS uuid
-        FROM public.tb_holerite_cabecalhos
-        WHERE TRIM(cpf::text) = TRIM(:cpf)
-          AND TRIM(matricula::text) = TRIM(:matricula)
-          AND {filtro_comp}
-        ORDER BY lote DESC NULLS LAST
-        LIMIT 1
-    """)
-    cab_row = db.execute(sql_cab, {"cpf": cpf, "matricula": matricula, "competencia": competencia}).first()
-    cabecalho = dict(cab_row._mapping) if cab_row else None
+    # Pega o UUID do primeiro registro
+    uuid = beneficios[0].get("uuid") if beneficios else None
 
     return {
+        "uuid": uuid,
         "cpf": cpf,
         "matricula": matricula,
         "competencia": competencia,
-        "cabeçalho": cabecalho,
         "beneficios": beneficios
     }
 
@@ -1311,3 +1345,134 @@ async def listar_competencias_beneficios(
         raise HTTPException(status_code=404, detail="Nenhuma competência encontrada para os parâmetros informados.")
 
     return {"competencias": competencias}
+
+@router.post("/documents/beneficios/montar")
+def montar_beneficio(
+    payload: dict = Body(...),
+    db: Session = Depends(get_db)
+):
+    cpf = (payload.get("cpf") or "").strip()
+    matricula = (payload.get("matricula") or "").strip()
+    competencia = (payload.get("competencia") or "").strip()
+
+    if not cpf or not matricula or not competencia:
+        raise HTTPException(status_code=422, detail="Informe cpf, matricula e competencia.")
+
+    filtro_comp = """
+        regexp_replace(TRIM(competencia), '[^0-9]', '', 'g') =
+        regexp_replace(TRIM(:competencia), '[^0-9]', '', 'g')
+    """
+
+    # Busca eventos de benefícios
+    sql_benef = text(f"""
+        SELECT
+            empresa,
+            filial,
+            cliente,
+            cpf,
+            matricula,
+            competencia,
+            lote,
+            evento,
+            evento_nome,
+            referencia,
+            valor,
+            tipo
+        FROM public.tb_beneficio_eventos
+        WHERE TRIM(cpf::text) = TRIM(:cpf)
+          AND TRIM(matricula::text) = TRIM(:matricula)
+          AND {filtro_comp}
+        ORDER BY evento
+    """)
+    result = db.execute(sql_benef, {"cpf": cpf, "matricula": matricula, "competencia": competencia}).fetchall()
+    if not result:
+        raise HTTPException(status_code=404, detail="Nenhum benefício encontrado para os critérios informados.")
+
+    eventos = [dict(r._mapping) for r in result]
+
+    # Dados gerais — pego da primeira linha (mesma matrícula/competência)
+    info = eventos[0]
+    empresa = info.get("empresa", "")
+    filial = info.get("filial", "")
+    cliente = info.get("cliente", "")
+    lote = info.get("lote", "")
+    competencia = info.get("competencia", "")
+    cpf = info.get("cpf", "")
+    matricula = info.get("matricula", "")
+
+    # Calcula totais
+    total_venc = sum(e["valor"] for e in eventos if e.get("tipo", "").upper() == "V")
+    total_desc = sum(e["valor"] for e in eventos if e.get("tipo", "").upper() == "D")
+    total_liquido = total_venc - total_desc
+
+    # Formata PDF no estilo holerite
+    pdf = FPDF(format='A4', unit='mm')
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 6, "Recibo de Benefícios", ln=0)
+    pdf.ln(8)
+
+    pdf.set_font("Arial", '', 9)
+    pdf.cell(100, 5, f"Empresa: {empresa} - Filial: {filial}", ln=0)
+    pdf.cell(0, 5, f"Cliente: {cliente}", ln=1)
+    pdf.cell(0, 5, f"Competência: {competencia}   Lote: {lote}", ln=1)
+    pdf.cell(0, 5, f"CPF: {cpf}   Matrícula: {matricula}", ln=1)
+    pdf.ln(4)
+
+    # Cabeçalho da tabela
+    pdf.set_font("Arial", 'B', 9)
+    pdf.cell(20, 6, "Evento", border=1)
+    pdf.cell(90, 6, "Descrição", border=1)
+    pdf.cell(30, 6, "Referência", border=1, align='R')
+    pdf.cell(25, 6, "Valor", border=1, align='R')
+    pdf.cell(25, 6, "Tipo", border=1, align='C')
+    pdf.ln(6)
+
+    pdf.set_font("Arial", '', 9)
+    for evt in eventos:
+        pdf.cell(20, 6, str(evt["evento"]), border=1)
+        pdf.cell(90, 6, evt["evento_nome"], border=1)
+        pdf.cell(30, 6, f"{evt['referencia']}", border=1, align='R')
+        pdf.cell(25, 6, f"{evt['valor']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."), border=1, align='R')
+        pdf.cell(25, 6, evt["tipo"], border=1, align='C')
+        pdf.ln(6)
+
+    # Totais
+    pdf.ln(2)
+    pdf.set_font("Arial", 'B', 9)
+    pdf.cell(140, 6, "Total Vencimentos", border=1, align='R')
+    pdf.cell(40, 6, f"{total_venc:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."), border=1, align='R')
+    pdf.ln(6)
+    pdf.cell(140, 6, "Total Descontos", border=1, align='R')
+    pdf.cell(40, 6, f"{total_desc:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."), border=1, align='R')
+    pdf.ln(6)
+    pdf.cell(140, 6, "Valor Líquido", border=1, align='R')
+    pdf.cell(40, 6, f"{total_liquido:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."), border=1, align='R')
+    pdf.ln(12)
+
+    # Assinatura
+    pdf.set_font("Arial", '', 9)
+    pdf.cell(0, 6, "Assinatura: _________________________________________", ln=1)
+    pdf.ln(10)
+    pdf.cell(0, 6, "Data: ____/____/____", ln=1, align='R')
+
+    # Gera base64
+    raw_pdf = pdf.output(dest='S').encode('latin-1')
+    pdf_base64 = base64.b64encode(raw_pdf).decode("utf-8")
+
+    return {
+        "cpf": cpf,
+        "matricula": matricula,
+        "competencia": competencia,
+        "empresa": empresa,
+        "filial": filial,
+        "cliente": cliente,
+        "lote": lote,
+        "total_vencimentos": total_venc,
+        "total_descontos": total_desc,
+        "valor_liquido": total_liquido,
+        "eventos": eventos,
+        "pdf_base64": pdf_base64
+    }
