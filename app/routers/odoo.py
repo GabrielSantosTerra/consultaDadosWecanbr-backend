@@ -1,5 +1,7 @@
-# app/routers/odoo_conversation.py
+# app/routes/routes_odoo_helpdesk.py
 import os
+import re
+import html
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -21,15 +23,36 @@ def _resolve_team_id(body_team: Optional[int]) -> Optional[int]:
     """Se o body não mandar team_id, usa HELPDESK_TEAM_ID do .env (se existir)."""
     return body_team if body_team is not None else _env_team_id()
 
+_TAG_RE = re.compile(r"<[^>]+>")
+
+def _html_to_text(s: str) -> str:
+    """
+    Remove QUALQUER marcação HTML e faz unescape básico.
+    Ex.: '<p>oi<br>tudo</p>' -> 'oi tudo'
+    """
+    if not s:
+        return ""
+    txt = _TAG_RE.sub("", s)
+    txt = re.sub(r"[ \t\r\f\v]+", " ", txt)
+    txt = txt.replace("\r\n", "\n").replace("\r", "\n")
+    return html.unescape(txt).strip()
+
+def _safe_plain(s: str) -> str:
+    """
+    Garante que vamos enviar ao Odoo apenas TEXTO (sem tags).
+    """
+    return html.escape(s or "", quote=False)
+
 # ---------- Schemas ----------
 class MessageIn(BaseModel):
-    body_html: str = Field(..., min_length=1)
-    author: Optional[str] = None
-    at: Optional[str] = None  # ISO8601 opcional (apenas informativo)
+    body: Optional[str] = None              # TEXTO PURO
+    body_html: Optional[str] = None         # compat (se front ainda enviar HTML)
+    author: Optional[str] = None            # informativo (ignorado na postagem)
+    at: Optional[str] = None                # informativo (ignorado na postagem)
 
 class RecordConversationIn(BaseModel):
-    ticket_id: Optional[int] = None               # se vier, usa o ticket existente
-    subject: str = Field(..., min_length=3)       # se não vier ticket_id, cria com este título
+    ticket_id: Optional[int] = None
+    subject: str = Field(..., min_length=3)
     team_id: Optional[int] = None
     partner_name: Optional[str] = None
     partner_email: Optional[str] = None
@@ -59,7 +82,7 @@ def create_ticket(body: RecordConversationIn):
         tid = svc.create_ticket(
             name=body.subject,
             description_html="<p>Ticket criado via API</p>",
-            team_id=_resolve_team_id(body.team_id),           # <- usa body.team_id ou HELPDESK_TEAM_ID
+            team_id=_resolve_team_id(body.team_id),
             partner_name=body.partner_name,
             partner_email=body.partner_email,
             tags=body.tags or [],
@@ -71,15 +94,19 @@ def create_ticket(body: RecordConversationIn):
 @router.post("/tickets/{ticket_id}/messages", response_model=TicketOut)
 def append_messages(ticket_id: int, body: RecordConversationIn):
     if not body.messages:
-        raise HTTPException(422, "messages vazio.")
+        raise HTTPException(status_code=422, detail="messages vazio.")
     try:
         svc = OdooHelpdeskService()
         for m in body.messages:
-            prefix = f"<p><b>{(m.author or 'Visitante').strip()}</b>"
-            if m.at:
-                prefix += f" <span style='color:#666'>({m.at})</span>"
-            prefix += ":</p>"
-            svc.message_post(ticket_id, prefix + m.body_html, message_type="comment")
+            # 1) prioriza TEXTO
+            raw_text = (m.body or "").strip()
+            if not raw_text and m.body_html:
+                raw_text = _html_to_text(m.body_html)
+            if not raw_text:
+                continue
+            # 2) envia texto escapado (sem tags)
+            final_text = _safe_plain(raw_text)
+            svc.message_post(ticket_id, final_text, message_type="comment")
         return {"ok": True, "ticket_id": ticket_id}
     except OdooError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -91,17 +118,19 @@ def record_conversation(body: RecordConversationIn):
         ticket_id = body.ticket_id or svc.create_ticket(
             name=body.subject,
             description_html="<p>Transcrição registrada via API</p>",
-            team_id=_resolve_team_id(body.team_id),           # <- usa body.team_id ou HELPDESK_TEAM_ID
+            team_id=_resolve_team_id(body.team_id),
             partner_name=body.partner_name,
             partner_email=body.partner_email,
             tags=body.tags or [],
         )
         for m in body.messages:
-            prefix = f"<p><b>{(m.author or 'Visitante').strip()}</b>"
-            if m.at:
-                prefix += f" <span style='color:#666'>({m.at})</span>"
-            prefix += ":</p>"
-            svc.message_post(ticket_id, prefix + m.body_html, message_type="comment")
+            raw_text = (m.body or "").strip()
+            if not raw_text and m.body_html:
+                raw_text = _html_to_text(m.body_html)
+            if not raw_text:
+                continue
+            final_text = _safe_plain(raw_text)
+            svc.message_post(ticket_id, final_text, message_type="comment")
         return {"ok": True, "ticket_id": ticket_id}
     except OdooError as e:
         raise HTTPException(status_code=400, detail=str(e))
