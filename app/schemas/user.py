@@ -17,7 +17,7 @@ class PessoaBase(BaseModel):
     matricula: Optional[str]
     data_nascimento: Optional[date]
     gestor: Optional[bool]
-
+    rh: Optional[bool]
 class PessoaCreate(BaseModel):
     nome: str
     cpf: str
@@ -25,6 +25,7 @@ class PessoaCreate(BaseModel):
     centro_de_custo: str
     matricula: str
     gestor: bool
+    rh: bool
     data_nascimento: date
 
 class PessoaRead(PessoaBase):
@@ -66,6 +67,7 @@ class PessoaResponse(BaseModel):
     cliente: Optional[str]
     centro_de_custo: Optional[str]
     gestor: Optional[bool]
+    rh: Optional[bool]
     email: str
     dados: List[DadoItem]
 

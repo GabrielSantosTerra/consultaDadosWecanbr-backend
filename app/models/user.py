@@ -14,6 +14,7 @@ class Pessoa(Base):
     matricula = Column(String(50), nullable=True)
     data_nascimento = Column(Date, nullable=True)
     gestor = Column(Boolean, default=False)
+    rh = Column(Boolean, default=False)
 
     usuarios = relationship("Usuario", back_populates="pessoa")
 

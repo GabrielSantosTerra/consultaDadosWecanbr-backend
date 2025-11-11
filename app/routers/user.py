@@ -173,6 +173,7 @@ def get_me(request: Request, db: Session = Depends(get_db)):
         cliente=getattr(pessoa, "cliente", None),
         centro_de_custo=getattr(pessoa, "centro_de_custo", None),
         gestor=bool(getattr(pessoa, "gestor", False)),
+        rh=bool(getattr(pessoa, "rh", False)),
         dados=dados
     )
 
