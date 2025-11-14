@@ -956,7 +956,290 @@ def baixar_documento(payload: DownloadDocumentoPayload):
             "base64_raw": response.text
         }
 
-@router.post("/documents/search")
+@router.post("/documents/search/informetrct")
+def buscar_search_documentos_ano(
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+):
+    """
+    Clonagem da /documents/search, mas usando chave:
+      - tipodedoc (exato)
+      - cpf (11 dígitos, com ou sem máscara)
+      - ano (extraído do campo_anomes)
+
+    Body igual ao da /documents/search:
+
+    {
+      "id_template": 6,
+      "cp": [
+        { "nome": "tipodedoc", "valor": "trtc" },
+        { "nome": "cpf", "valor": "01547656000" }
+      ],
+      "campo_anomes": "ano",
+      "anomes": "2025"
+    }
+
+    Regras:
+      - Se NÃO vier 'anomes'/'anomes_in' -> retorna somente os ANOS disponíveis
+      - Se vier 'anomes'/'anomes_in' -> retorna documentos daquele ano
+    """
+
+    def _normaliza_ano_local(valor: str) -> Optional[str]:
+        v = (valor or "").strip()
+        if not v:
+            return None
+        m = re.search(r"\d{4}", v)
+        return m.group(0) if m else None
+
+    def _coleta_anos_via_search(
+        headers: Dict[str, str],
+        id_template: int | str,
+        nomes_campos: List[str],
+        lista_cp: List[str],
+        campo_ano: str,
+        max_pages: int = 10,
+    ) -> List[str]:
+        anos: Set[str] = set()
+        pagina = 1
+        total_paginas = 1
+        while pagina <= total_paginas and pagina <= max_pages:
+            form = [("id_tipo", str(id_template))]
+            form += [("cp[]", v) for v in lista_cp]
+            form += [
+                ("ordem", "no_ordem"),
+                ("dt_criacao", ""),
+                ("pagina", str(pagina)),
+                ("colecao", "S"),
+            ]
+            r = requests.post(
+                f"{BASE_URL}/documents/search",
+                data=form,
+                headers=headers,
+                timeout=60,
+            )
+            r.raise_for_status()
+            data = r.json() or {}
+            docs = [_flatten_attributes(doc) for doc in (data.get("documents") or [])]
+            for d in docs:
+                bruto = str(d.get(campo_ano, "")).strip()
+                n = _normaliza_ano_local(bruto)
+                if n:
+                    anos.add(n)
+
+            vars_ = data.get("variables") or {}
+            try:
+                total_paginas = int(vars_.get("totalpaginas", total_paginas))
+            except Exception:
+                total_paginas = 1
+            pagina += 1
+
+        return sorted(anos, reverse=True)
+
+    # ---- 0) lê payload no MESMO formato da /documents/search ----
+    id_template = payload.get("id_template")
+    cp_items = payload.get("cp") or []
+    campo_anomes = (payload.get("campo_anomes") or "ano").strip()
+    anomes_raw = (payload.get("anomes") or "").strip()
+    anomes_in_raw = payload.get("anomes_in")
+
+    if not id_template:
+        raise HTTPException(422, detail="Informe 'id_template' no payload.")
+
+    # ---- 1) autenticação GED ----
+    try:
+        auth_key = login(
+            conta=settings.GED_CONTA,
+            usuario=settings.GED_USUARIO,
+            senha=settings.GED_SENHA,
+        )
+    except Exception as e:
+        raise HTTPException(502, f"Falha na autenticação no GED: {e}")
+    headers = _headers(auth_key)
+
+    # ---- 2) campos do template ----
+    r_fields = requests.post(
+        f"{BASE_URL}/templates/getfields",
+        data={"id_template": id_template},
+        headers=headers,
+        timeout=30,
+    )
+    r_fields.raise_for_status()
+    fields_json = r_fields.json() or {}
+    nomes_campos = [f.get("nomecampo") for f in fields_json.get("fields", []) if f.get("nomecampo")]
+
+    if not nomes_campos:
+        raise HTTPException(400, "Template sem campos ou inválido")
+    if campo_anomes not in nomes_campos:
+        raise HTTPException(400, f"Campo '{campo_anomes}' não existe no template")
+
+    def _campos_template_txt() -> str:
+        return ", ".join(nomes_campos) if nomes_campos else "(vazio)"
+
+    # ---- 3) monta cp[] na ordem do template (igual /documents/search) ----
+    lista_cp = ["" for _ in nomes_campos]
+    for item in cp_items:
+        nome = (item.get("nome") or "").strip()
+        valor = (item.get("valor") or "").strip()
+        if not nome:
+            continue
+        if nome not in nomes_campos:
+            raise HTTPException(400, f"Campo '{nome}' não existe no template")
+        lista_cp[nomes_campos.index(nome)] = valor
+
+    # ---- 4) chave composta: tipodedoc + cpf ----
+    if "tipodedoc" not in nomes_campos:
+        raise HTTPException(400, f"Template precisa ter 'tipodedoc'. Campos: [{_campos_template_txt()}]")
+    if "cpf" not in nomes_campos:
+        raise HTTPException(400, f"Template precisa ter 'cpf'. Campos: [{_campos_template_txt()}]")
+
+    idx_tipodedoc = nomes_campos.index("tipodedoc")
+    idx_cpf = nomes_campos.index("cpf")
+
+    tipodedoc_val = (lista_cp[idx_tipodedoc] or "").strip()
+    if not tipodedoc_val:
+        raise HTTPException(422, "Informe 'tipodedoc' em cp[] para a chave composta.")
+
+    cpf_raw = (lista_cp[idx_cpf] or "").strip()
+    cpf_digits = _only_digits(cpf_raw)
+    if len(cpf_digits) != 11:
+        raise HTTPException(422, "Informe 'cpf' em cp[] com 11 dígitos (com ou sem máscara).")
+
+    # força valores normalizados em cp[]
+    lista_cp[idx_tipodedoc] = tipodedoc_val
+    lista_cp[idx_cpf] = f"%{cpf_digits}%"
+
+    # ------------------------------------------------------------------
+    # 5) Se NÃO informar anomes/anomes_in → lista ANOS (tipodedoc + cpf)
+    # ------------------------------------------------------------------
+    alvo: Set[str] = set()
+    if not anomes_raw and not anomes_in_raw:
+        form_filter = [
+            ("id_tipo", str(id_template)),
+            ("filtro", campo_anomes),
+            ("filtro1", "tipodedoc"),
+            ("filtro1_valor", tipodedoc_val),
+            ("filtro2", "cpf"),
+            ("filtro2_valor", f"%{cpf_digits}%"),
+        ]
+        try:
+            rf = requests.post(
+                f"{BASE_URL}/documents/filter",
+                data=form_filter,
+                headers=headers,
+                timeout=60,
+            )
+            rf.raise_for_status()
+            fdata = rf.json() or {}
+            if fdata.get("error"):
+                raise RuntimeError(f"GED error: {fdata.get('message')}")
+            grupos = fdata.get("groups") or []
+
+            anos_set: Set[str] = set()
+            for g in grupos:
+                bruto = str(g.get(campo_anomes, "")).strip()
+                n = _normaliza_ano_local(bruto)
+                if n:
+                    anos_set.add(n)
+
+            if anos_set:
+                anos_sorted = sorted({int(a) for a in anos_set}, reverse=True)
+                return {"anos": [{"ano": a} for a in anos_sorted]}
+
+        except (requests.HTTPError, requests.RequestException, RuntimeError):
+            # === Fallback padrão igual /documents/search → via /documents/search paginado ===
+            anos_norm = _coleta_anos_via_search(
+                headers=headers,
+                id_template=id_template,
+                nomes_campos=nomes_campos,
+                lista_cp=lista_cp,
+                campo_ano=campo_anomes,
+            )
+            if anos_norm:
+                anos_sorted = sorted({int(a) for a in anos_norm}, reverse=True)
+                return {"anos": [{"ano": a} for a in anos_sorted]}
+            raise HTTPException(404, "Nenhum ano disponível para os parâmetros enviados.")
+
+    # ------------------------------------------------------------------
+    # 6) Temos anomes/anomes_in → tratar como lista de ANOS (YYYY)
+    # ------------------------------------------------------------------
+    if anomes_raw:
+        n = _normaliza_ano_local(anomes_raw)
+        if not n:
+            raise HTTPException(
+                400,
+                "anomes inválido. Informe algo que contenha um ano, ex: '2024' ou '01/2024'.",
+            )
+        alvo.add(n)
+
+    if anomes_in_raw:
+        if isinstance(anomes_in_raw, list):
+            for val in anomes_in_raw:
+                n = _normaliza_ano_local(str(val))
+                if not n:
+                    raise HTTPException(400, f"Valor inválido em anomes_in: '{val}'")
+                alvo.add(n)
+        else:
+            n = _normaliza_ano_local(str(anomes_in_raw))
+            if not n:
+                raise HTTPException(400, f"Valor inválido em anomes_in: '{anomes_in_raw}'")
+            alvo.add(n)
+
+    # ------------------------------------------------------------------
+    # 7) executa a busca (idêntico à /documents/search, mas filtra por ANO)
+    # ------------------------------------------------------------------
+    def _do_search(cp_override: Optional[List[str]] = None):
+        form = [("id_tipo", str(id_template))]
+        form += [("cp[]", v) for v in (cp_override if cp_override is not None else lista_cp)]
+        form += [
+            ("ordem", "no_ordem"),
+            ("dt_criacao", ""),
+            ("pagina", "1"),
+            ("colecao", "S"),
+        ]
+        r = requests.post(f"{BASE_URL}/documents/search", data=form, headers=headers, timeout=60)
+        r.raise_for_status()
+        data = r.json() or {}
+        if data.get("error"):
+            raise HTTPException(500, f"GED erro (search): {data.get('message')}")
+        return [_flatten_attributes(doc) for doc in (data.get("documents") or [])]
+
+    try:
+        documentos_total = _do_search()
+    except requests.HTTPError as err:
+        try:
+            raise HTTPException(err.response.status_code, f"GED erro: {err.response.json()}")
+        except Exception:
+            raise HTTPException(
+                getattr(err.response, "status_code", 502),
+                f"GED erro: {getattr(err.response, 'text', err)}",
+            )
+    except requests.RequestException as e:
+        raise HTTPException(502, f"Falha ao consultar GED (search): {e}")
+
+    # ------------------------------------------------------------------
+    # 8) pós-processa e aplica filtro por ANO
+    # ------------------------------------------------------------------
+    filtrados: List[Dict[str, Any]] = []
+    for d in documentos_total:
+        bruto = str(d.get(campo_anomes, "")).strip()
+        n = _normaliza_ano_local(bruto)
+        if n and (not alvo or n in alvo):
+            d["_norm_ano"] = n
+            filtrados.append(d)
+
+    if not filtrados:
+        raise HTTPException(404, "Nenhum documento encontrado para os parâmetros informados.")
+
+    filtrados.sort(key=lambda x: x["_norm_ano"], reverse=True)
+
+    return {
+        "total_bruto": len(documentos_total),
+        "anos_solicitados": sorted(alvo, reverse=True) if alvo else [],
+        "total_encontrado": len(filtrados),
+        "documentos": filtrados,
+    }
+
+@router.post("/documents/search/recibos")
 def buscar_search_documentos(payload: SearchDocumentosRequest, db: Session = Depends(get_db)):
     # 1) autenticação no GED
     try:
