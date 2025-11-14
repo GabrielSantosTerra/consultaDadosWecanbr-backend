@@ -124,7 +124,7 @@ def listar_tipos_documentos(request: Request, db: Session = Depends(get_db)):
                 TipoDocumento.nome.ilike("%holerite%"),
                 TipoDocumento.nome.ilike("%recibo vt%"),
                 TipoDocumento.nome.ilike("%recibo va%"),
-                TipoDocumento.nome.ilike("%informe rendimentos%"),
+                TipoDocumento.nome.ilike("%informe rendimento%"),
                 TipoDocumento.nome.ilike("%trtc%")
             )
         ).all()
@@ -134,7 +134,7 @@ def listar_tipos_documentos(request: Request, db: Session = Depends(get_db)):
             or_(
                 TipoDocumento.nome.ilike("%benef%"),  # cobre beneficio / benefício
                 TipoDocumento.nome.ilike("%holerite%"),
-                TipoDocumento.nome.ilike("%informe rendimentos%"),
+                TipoDocumento.nome.ilike("%informe rendimento%"),
                 TipoDocumento.nome.ilike("%trtc%")
             )
         ).all()
