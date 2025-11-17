@@ -1200,7 +1200,7 @@ def buscar_search_documentos_ano(
         r.raise_for_status()
         data = r.json() or {}
         if data.get("error"):
-            raise HTTPException(500, f"GED erro (search): {data.get('message')}")
+            raise HTTPException(400, f"Documento não encontrardo para crietérios informados")
         return [_flatten_attributes(doc) for doc in (data.get("documents") or [])]
 
     try:
