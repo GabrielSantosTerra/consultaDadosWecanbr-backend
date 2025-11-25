@@ -113,29 +113,58 @@ def listar_tipos_documentos(request: Request, db: Session = Depends(get_db)):
     if not pessoa:
         raise HTTPException(status_code=401, detail="Pessoa não encontrada")
 
-    cliente = str(getattr(pessoa, "cliente", "")).strip()
+    cpf_pessoa = str(pessoa.cpf or "").strip()
+    mat_pessoa = str(getattr(pessoa, "matricula", "") or "").strip()
+
+    clientes_ids: set[str] = set()
+
+    if getattr(pessoa, "cliente", None):
+        clientes_ids.add(str(pessoa.cliente).strip())
+
+    sql_clientes = text("""
+        SELECT DISTINCT TRIM(c.cliente::text) AS cliente
+        FROM tb_holerite_cabecalhos c
+        WHERE
+            (
+                regexp_replace(TRIM(c.cpf::text), '[^0-9]', '', 'g')
+                = regexp_replace(TRIM(:cpf), '[^0-9]', '', 'g')
+                OR
+                (TRIM(:matricula) <> '' AND TRIM(c.matricula::text) = TRIM(:matricula))
+            )
+          AND c.cliente IS NOT NULL
+          AND TRIM(c.cliente::text) <> ''
+    """)
+
+    rows_cli = db.execute(
+        sql_clientes,
+        {"cpf": cpf_pessoa, "matricula": mat_pessoa},
+    ).fetchall()
+
+    for row in rows_cli:
+        cid = str(row[0]).strip()
+        if cid:
+            clientes_ids.add(cid)
 
     query = db.query(TipoDocumento)
 
-    if cliente == "5849":
-        # Cliente 5849 (Sapore): Holerite + Recibo VT + Recibo VA
+    if "5849" in clientes_ids:
         documentos = query.filter(
             or_(
+                TipoDocumento.nome.ilike("%benef%"),
                 TipoDocumento.nome.ilike("%holerite%"),
                 TipoDocumento.nome.ilike("%recibo vt%"),
                 TipoDocumento.nome.ilike("%recibo va%"),
                 TipoDocumento.nome.ilike("%informe rendimento%"),
-                TipoDocumento.nome.ilike("%trtc%")
+                TipoDocumento.nome.ilike("%trtc%"),
             )
         ).all()
     else:
-        # Outros clientes: Benefício + Holerite
         documentos = query.filter(
             or_(
-                TipoDocumento.nome.ilike("%benef%"),  # cobre beneficio / benefício
+                TipoDocumento.nome.ilike("%benef%"),
                 TipoDocumento.nome.ilike("%holerite%"),
                 TipoDocumento.nome.ilike("%informe rendimento%"),
-                TipoDocumento.nome.ilike("%trtc%")
+                TipoDocumento.nome.ilike("%trtc%"),
             )
         ).all()
 
