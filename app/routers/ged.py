@@ -1567,16 +1567,16 @@ def buscar_beneficios(payload: dict = Body(...), db: Session = Depends(get_db)):
     cpf = (payload.get("cpf") or "").strip()
     matricula = (payload.get("matricula") or "").strip()
     competencia = (payload.get("competencia") or "").strip()
+    empresa = (payload.get("empresa") or payload.get("cliente") or "").strip()
 
-    if not cpf or not matricula or not competencia:
-        raise HTTPException(status_code=422, detail="Informe cpf, matricula e competencia.")
+    if not cpf or not matricula or not competencia or not empresa:
+        raise HTTPException(status_code=422, detail="Informe cpf, matricula, competencia e empresa.")
 
     filtro_comp = """
         regexp_replace(TRIM(competencia), '[^0-9]', '', 'g') =
         regexp_replace(TRIM(:competencia), '[^0-9]', '', 'g')
     """
 
-    # --- Benefícios ---
     sql_benef = text(f"""
         SELECT
             uuid::text AS uuid,
@@ -1595,19 +1595,19 @@ def buscar_beneficios(payload: dict = Body(...), db: Session = Depends(get_db)):
         FROM public.tb_beneficio_eventos
         WHERE TRIM(cpf::text) = TRIM(:cpf)
           AND TRIM(matricula::text) = TRIM(:matricula)
+          AND TRIM(cliente::text)   = TRIM(:empresa)
           AND {filtro_comp}
         ORDER BY evento
     """)
     benef_rows = db.execute(
-        sql_benef, {"cpf": cpf, "matricula": matricula, "competencia": competencia}
+        sql_benef,
+        {"cpf": cpf, "matricula": matricula, "competencia": competencia, "empresa": empresa},
     ).fetchall()
 
     if not benef_rows:
         raise HTTPException(status_code=404, detail="Nenhum benefício encontrado para os critérios informados.")
 
     beneficios = [dict(r._mapping) for r in benef_rows]
-
-    # Pega o UUID do primeiro registro
     uuid = beneficios[0].get("uuid") if beneficios else None
 
     return {
@@ -1615,6 +1615,7 @@ def buscar_beneficios(payload: dict = Body(...), db: Session = Depends(get_db)):
         "cpf": cpf,
         "matricula": matricula,
         "competencia": competencia,
+        "empresa": empresa,
         "beneficios": beneficios
     }
 
@@ -1623,51 +1624,48 @@ async def listar_competencias_beneficios(
     request: Request,
     cpf: Optional[str] = Query(None),
     matricula: Optional[str] = Query(None),
+    empresa: Optional[str] = Query(None),
     cliente: Optional[str] = Query(None),
     db: Session = Depends(get_db)
 ):
     """
     Lista competências (ano, mes) disponíveis em tb_beneficio_eventos
-    para a chave (cpf, matricula) e, opcionalmente, cliente (código).
+    para a chave (cpf, matricula, empresa).
     """
 
-    # Fallback: tentar ler do body JSON se não vier via querystring
-    if not cpf or not matricula:
+    empresa = empresa or cliente
+
+    if not cpf or not matricula or not empresa:
         try:
             body = await request.json()
             if isinstance(body, dict):
                 cpf = cpf or body.get("cpf")
                 matricula = matricula or body.get("matricula")
-                cliente = cliente or body.get("cliente")
+                empresa = empresa or body.get("empresa") or body.get("cliente")
         except Exception:
-            pass  # body ausente ou inválido
+            pass
 
-    if not cpf or not matricula:
+    if not cpf or not matricula or not empresa:
         raise HTTPException(
             status_code=422,
-            detail="Informe 'cpf' e 'matricula' (na querystring ou no body JSON)."
+            detail="Informe 'cpf', 'matricula' e 'empresa' (na querystring ou no body JSON)."
         )
 
     params: Dict[str, Any] = {
         "cpf": str(cpf).strip(),
         "matricula": str(matricula).strip(),
+        "empresa": str(empresa).strip(),
     }
 
-    f_cli = ""
-    if cliente:
-        f_cli = " AND TRIM(cliente::text) = TRIM(:cliente) "
-        params["cliente"] = str(cliente).strip()
-
-    # Consulta distinta das competências normalizadas
-    sql_lista_comp = text(f"""
+    sql_lista_comp = text("""
         SELECT DISTINCT
                regexp_replace(TRIM(competencia), '[^0-9]', '', 'g') AS comp
           FROM tb_beneficio_eventos
          WHERE TRIM(cpf::text) = TRIM(:cpf)
            AND TRIM(matricula::text) = TRIM(:matricula)
-           {f_cli}
+           AND TRIM(cliente::text)   = TRIM(:empresa)
            AND competencia IS NOT NULL
-           AND regexp_replace(TRIM(competencia), '[^0-9]', '', 'g') ~ '^[0-9]{{6}}$'
+           AND regexp_replace(TRIM(competencia), '[^0-9]', '', 'g') ~ '^[0-9]{6}$'
          ORDER BY comp DESC
     """)
 
