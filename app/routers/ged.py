@@ -91,6 +91,7 @@ class BuscarHolerite(BaseModel):
     cpf: str = Field(..., min_length=1)
     matricula: str = Field(..., min_length=1)
     competencia: str = Field(..., min_length=1)
+    empresa: str = Field(..., min_length=1)
 
 class MontarHolerite(BaseModel):
     matricula: str
@@ -311,44 +312,44 @@ def upload_documento_base64(payload: UploadBase64Payload):
 # ============================
 # NOVA ROTA: listar competências
 # ============================
+
 @router.post("/documents/holerite/competencias")
 async def listar_competencias_holerite(
     request: Request,
     cpf: Optional[str] = Query(None, description="CPF (com ou sem máscara)"),
     matricula: Optional[str] = Query(None, description="Matrícula exata"),
-    cliente: Optional[str] = Query(None, description="Código do cliente (empresa)"),
-    db: Session = Depends(get_db)
+    empresa: Optional[str] = Query(None, description="Código da empresa/cliente"),
+    cliente: Optional[str] = Query(None, description="Alias antigo do código do cliente"),
+    db: Session = Depends(get_db),
 ):
     """
     Lista competências (ano, mes) onde há coerência entre eventos, cabeçalho e rodapé
-    para a chave (cpf, matricula) e, opcionalmente, cliente (código).
-
-    Se cpf/matricula não vierem na querystring, tenta ler do JSON do body (GET com body).
+    para a chave (cpf, matricula, empresa).
     """
-    # Fallback para body JSON caso a query não traga os campos
-    if not cpf or not matricula:
+
+    empresa = empresa or cliente
+
+    if not cpf or not matricula or not empresa:
         try:
             body = await request.json()
             if isinstance(body, dict):
                 cpf = cpf or body.get("cpf")
                 matricula = matricula or body.get("matricula")
-                cliente = cliente or body.get("cliente")
+                empresa = empresa or body.get("empresa") or body.get("cliente")
         except Exception:
-            pass  # sem body ou body inválido
+            pass
 
-    if not cpf or not matricula:
-        raise HTTPException(status_code=422, detail="Informe 'cpf' e 'matricula' (na querystring ou no body JSON).")
+    if not cpf or not matricula or not empresa:
+        raise HTTPException(
+            status_code=422,
+            detail="Informe 'cpf', 'matricula' e 'empresa' (na querystring ou no body JSON).",
+        )
 
     params: Dict[str, Any] = {
         "cpf": str(cpf).strip(),
-        "matricula": str(matricula).strip()
+        "matricula": str(matricula).strip(),
+        "empresa": str(empresa).strip(),
     }
-
-    # Filtro do cabeçalho: sempre restringe por matrícula; cliente (código) é opcional
-    f_cab = " AND TRIM(c.matricula::text) = TRIM(:matricula) "
-    if cliente:
-        f_cab += " AND TRIM(c.cliente::text) = TRIM(:cliente) "
-        params["cliente"] = str(cliente).strip()
 
     sql_lista_comp = text(f"""
         WITH norm_evt AS (
@@ -358,6 +359,7 @@ async def listar_competencias_holerite(
             FROM tb_holerite_eventos e
             WHERE TRIM(e.cpf::text) = TRIM(:cpf)
               AND TRIM(e.matricula::text) = TRIM(:matricula)
+              AND TRIM(e.cliente::text)   = TRIM(:empresa)
               AND e.competencia IS NOT NULL
         ),
         norm_cab AS (
@@ -366,7 +368,8 @@ async def listar_competencias_holerite(
                    c.lote
             FROM tb_holerite_cabecalhos c
             WHERE TRIM(c.cpf::text) = TRIM(:cpf)
-              {f_cab}
+              AND TRIM(c.matricula::text) = TRIM(:matricula)
+              AND TRIM(c.cliente::text)   = TRIM(:empresa)
               AND c.competencia IS NOT NULL
         ),
         norm_rod AS (
@@ -376,6 +379,7 @@ async def listar_competencias_holerite(
             FROM tb_holerite_rodapes r
             WHERE TRIM(r.cpf::text) = TRIM(:cpf)
               AND TRIM(r.matricula::text) = TRIM(:matricula)
+              AND TRIM(r.cliente::text)   = TRIM(:empresa)
               AND r.competencia IS NOT NULL
         ),
         valid AS (
@@ -392,6 +396,7 @@ async def listar_competencias_holerite(
         WHERE comp ~ '^[0-9]{{6}}$'
         ORDER BY ano DESC, mes DESC
     """)
+
     rows = db.execute(sql_lista_comp, params).fetchall()
     competencias = [{"ano": r[0], "mes": r[1]} for r in rows if r[0] is not None and r[1] is not None]
 
@@ -399,6 +404,7 @@ async def listar_competencias_holerite(
         raise HTTPException(status_code=404, detail="Nenhuma competência encontrada para os parâmetros informados.")
 
     return {"competencias": competencias}
+
 # ==========================================
 # ROTA SIMPLIFICADA: buscar holerite direto
 # ==========================================
@@ -409,18 +415,24 @@ def buscar_holerite(
     db: Session = Depends(get_db),
 ):
     """
-    ALTERAÇÕES:
+    Busca holerite para uma chave (cpf, matricula, competencia, empresa).
+
     - Agrupa eventos por tipo_calculo ('A' adiantamento, 'P' pagamento) e retorna em `documentos`.
     - Mantém `eventos` no root (compat), priorizando `P`; se não houver, usa `A`.
-    - Restante da lógica (lote, cabeçalho, rodapé, aceite) preservada.
+    - Garante que todos os SELECTs filtram por cliente = empresa.
     """
     cpf = (payload.cpf or "").strip()
     matricula = (payload.matricula or "").strip()
     competencia = (payload.competencia or "").strip()
+    empresa = (payload.empresa or "").strip()
 
-    if not cpf or not matricula or not competencia:
-        raise HTTPException(status_code=422, detail="Informe cpf, matricula e competencia.")
+    if not cpf or not matricula or not competencia or not empresa:
+        raise HTTPException(
+            status_code=422,
+            detail="Informe cpf, matricula, competencia e empresa."
+        )
 
+    # filtro de competência (normaliza para YYYYMM)
     filtro_comp_evt = """
       regexp_replace(TRIM(e.competencia), '[^0-9]', '', 'g') =
       regexp_replace(TRIM(:competencia),  '[^0-9]', '', 'g')
@@ -428,39 +440,54 @@ def buscar_holerite(
     filtro_comp_cab = filtro_comp_evt.replace("e.", "c.")
     filtro_comp_rod = filtro_comp_evt.replace("e.", "r.")
 
-    params_base = {"cpf": cpf, "matricula": matricula, "competencia": competencia}
+    params_base = {
+        "cpf": cpf,
+        "matricula": matricula,
+        "competencia": competencia,
+        "empresa": empresa,
+    }
 
-    # 1) Verifica eventos (qualquer tipo_calculo)
+    # 1) Verifica se existem eventos para (cpf, matricula, competencia, empresa)
     sql_has_evt = text(f"""
         SELECT EXISTS(
             SELECT 1
-            FROM tb_holerite_eventos e
-            WHERE TRIM(e.cpf::text) = TRIM(:cpf)
-              AND TRIM(e.matricula::text) = TRIM(:matricula)
-              AND {filtro_comp_evt}
+              FROM tb_holerite_eventos e
+             WHERE TRIM(e.cpf::text)       = TRIM(:cpf)
+               AND TRIM(e.matricula::text) = TRIM(:matricula)
+               AND TRIM(e.cliente::text)   = TRIM(:empresa)
+               AND {filtro_comp_evt}
         ) AS has_evt
     """)
     has_evt = bool(db.execute(sql_has_evt, params_base).scalar())
     if not has_evt:
-        raise HTTPException(status_code=404, detail="Nenhum evento de holerite encontrado para os critérios informados.")
+        raise HTTPException(
+            status_code=404,
+            detail="Nenhum evento de holerite encontrado para os critérios informados."
+        )
 
-    # 2) Busca eventos (aqui ainda sem filtrar o lote; manteremos o fluxo original)
-    #    Observação: como agora precisamos de 'tipo_calculo', usamos SELECT * assumindo que a coluna existe.
+    # 2) Busca eventos (ainda sem fixar o lote)
     sql_eventos = text(f"""
         SELECT *
-        FROM tb_holerite_eventos e
-        WHERE TRIM(e.cpf::text) = TRIM(:cpf)
-          AND TRIM(e.matricula::text) = TRIM(:matricula)
-          AND {filtro_comp_evt}
-        ORDER BY evento
+          FROM tb_holerite_eventos e
+         WHERE TRIM(e.cpf::text)       = TRIM(:cpf)
+           AND TRIM(e.matricula::text) = TRIM(:matricula)
+           AND TRIM(e.cliente::text)   = TRIM(:empresa)
+           AND {filtro_comp_evt}
+         ORDER BY evento
     """)
     evt_res = db.execute(sql_eventos, params_base)
     eventos = [dict(zip(evt_res.keys(), row)) for row in evt_res.fetchall()]
     if not eventos:
-        raise HTTPException(status_code=404, detail="Nenhum evento encontrado após a consulta.")
+        raise HTTPException(
+            status_code=404,
+            detail="Nenhum evento encontrado após a consulta."
+        )
 
-    # 3) Alinha por lote: escolher o primeiro lote que possua cabeçalho e rodapé coerentes
-    lotes = sorted({e.get("lote") for e in eventos if e.get("lote") is not None}, reverse=True)
+    # 3) Descobre os lotes existentes e tenta alinhar com cabeçalho/rodapé
+    lotes = sorted(
+        {e.get("lote") for e in eventos if e.get("lote") is not None},
+        reverse=True,
+    )
 
     cabecalho = None
     rodape = None
@@ -475,22 +502,24 @@ def buscar_holerite(
         if lote is not None:
             sql_cab = text(f"""
                 SELECT *
-                FROM tb_holerite_cabecalhos c
-                WHERE TRIM(c.cpf::text) = TRIM(:cpf)
-                  AND TRIM(c.matricula::text) = TRIM(:matricula)
-                  AND {filtro_comp_cab}
-                  AND c.lote = :lote
-                LIMIT 1
+                  FROM tb_holerite_cabecalhos c
+                 WHERE TRIM(c.cpf::text)       = TRIM(:cpf)
+                   AND TRIM(c.matricula::text) = TRIM(:matricula)
+                   AND TRIM(c.cliente::text)   = TRIM(:empresa)
+                   AND {filtro_comp_cab}
+                   AND c.lote = :lote
+                 LIMIT 1
             """)
         else:
             sql_cab = text(f"""
                 SELECT *
-                FROM tb_holerite_cabecalhos c
-                WHERE TRIM(c.cpf::text) = TRIM(:cpf)
-                  AND TRIM(c.matricula::text) = TRIM(:matricula)
-                  AND {filtro_comp_cab}
-                ORDER BY lote DESC NULLS LAST
-                LIMIT 1
+                  FROM tb_holerite_cabecalhos c
+                 WHERE TRIM(c.cpf::text)       = TRIM(:cpf)
+                   AND TRIM(c.matricula::text) = TRIM(:matricula)
+                   AND TRIM(c.cliente::text)   = TRIM(:empresa)
+                   AND {filtro_comp_cab}
+                 ORDER BY lote DESC NULLS LAST
+                 LIMIT 1
             """)
 
         cab_res = db.execute(sql_cab, params_try)
@@ -501,22 +530,24 @@ def buscar_holerite(
         if lote is not None:
             sql_rod = text(f"""
                 SELECT *
-                FROM tb_holerite_rodapes r
-                WHERE TRIM(r.cpf::text) = TRIM(:cpf)
-                  AND TRIM(r.matricula::text) = TRIM(:matricula)
-                  AND {filtro_comp_rod}
-                  AND r.lote = :lote
-                LIMIT 1
+                  FROM tb_holerite_rodapes r
+                 WHERE TRIM(r.cpf::text)       = TRIM(:cpf)
+                   AND TRIM(r.matricula::text) = TRIM(:matricula)
+                   AND TRIM(r.cliente::text)   = TRIM(:empresa)
+                   AND {filtro_comp_rod}
+                   AND r.lote = :lote
+                 LIMIT 1
             """)
         else:
             sql_rod = text(f"""
                 SELECT *
-                FROM tb_holerite_rodapes r
-                WHERE TRIM(r.cpf::text) = TRIM(:cpf)
-                  AND TRIM(r.matricula::text) = TRIM(:matricula)
-                  AND {filtro_comp_rod}
-                ORDER BY lote DESC NULLS LAST
-                LIMIT 1
+                  FROM tb_holerite_rodapes r
+                 WHERE TRIM(r.cpf::text)       = TRIM(:cpf)
+                   AND TRIM(r.matricula::text) = TRIM(:matricula)
+                   AND TRIM(r.cliente::text)   = TRIM(:empresa)
+                   AND {filtro_comp_rod}
+                 ORDER BY lote DESC NULLS LAST
+                 LIMIT 1
             """)
 
         rod_res = db.execute(sql_rod, params_try)
@@ -532,13 +563,23 @@ def buscar_holerite(
     if not cabecalho and not rodape:
         raise HTTPException(
             status_code=404,
-            detail="Cabeçalho e rodapé ausentes para a competência informada (possível divergência de lote/matrícula)."
+            detail=(
+                "Cabeçalho e rodapé ausentes para a competência informada "
+                "(possível divergência de lote/matrícula/empresa)."
+            ),
         )
     if not cabecalho:
-        raise HTTPException(status_code=404, detail="Cabeçalho ausente para a competência/lote/matrícula.")
+        raise HTTPException(
+            status_code=404,
+            detail="Cabeçalho ausente para a competência/lote/matrícula/empresa."
+        )
     if not rodape:
-        raise HTTPException(status_code=404, detail="Rodapé ausente para a competência/lote/matrícula.")
+        raise HTTPException(
+            status_code=404,
+            detail="Rodapé ausente para a competência/lote/matrícula/empresa."
+        )
 
+    # 4) Se tiver lote escolhido, filtra eventos para esse lote
     if lote_escolhido is not None:
         eventos = [e for e in eventos if e.get("lote") == lote_escolhido]
         if not eventos:
@@ -547,19 +588,20 @@ def buscar_holerite(
                 detail="Eventos não encontrados para o mesmo lote do cabeçalho/rodapé."
             )
 
-    # ===== NOVO: separar por tipo_calculo (A/P) mantendo compatibilidade =====
-    # Ordena em Python priorizando 'A' depois 'P' (ajuste se quiser priorizar P primeiro)
+    # ===== Separar por tipo_calculo (A/P) =====
     def _ord_tc(tc: str) -> int:
         tc = (tc or "").upper()
+        # Aqui você decide a prioridade. Vou manter A primeiro, depois P:
+        # se quiser priorizar P primeiro, troque os valores.
         return 1 if tc == "A" else (2 if tc == "P" else 99)
 
     try:
         eventos_sorted = sorted(
             eventos,
-            key=lambda e: (_ord_tc(e.get("tipo_calculo")), e.get("evento"))
+            key=lambda e: (_ord_tc(e.get("tipo_calculo")), e.get("evento")),
         )
     except Exception:
-        eventos_sorted = eventos  # fallback se houver tipos mistos/None
+        eventos_sorted = eventos
 
     grupos = {"A": [], "P": []}
     for e in eventos_sorted:
@@ -567,66 +609,74 @@ def buscar_holerite(
         if tc in grupos:
             grupos[tc].append(e)
 
-    # documentos: retorna blocos por tipo_calculo com descrição
     documentos = []
     if grupos["A"]:
-        documentos.append({
-            "tipo_calculo": "A",
-            "descricao": "Adiantamento",
-            "eventos": grupos["A"],
-        })
+        documentos.append(
+            {
+                "tipo_calculo": "A",
+                "descricao": "Adiantamento",
+                "eventos": grupos["A"],
+            }
+        )
     if grupos["P"]:
-        documentos.append({
-            "tipo_calculo": "P",
-            "descricao": "Pagamento",
-            "eventos": grupos["P"],
-        })
+        documentos.append(
+            {
+                "tipo_calculo": "P",
+                "descricao": "Pagamento",
+                "eventos": grupos["P"],
+            }
+        )
 
-    # Compat: root.eventos prioriza Pagamento (P); se não houver, usa Adiantamento (A)
-    eventos_root = grupos["P"] if grupos["P"] else grupos["A"] if grupos["A"] else eventos_sorted
+    # compat: eventos_root prioriza Pagamento (P), depois Adiantamento (A)
+    if grupos["P"]:
+        eventos_root = grupos["P"]
+    elif grupos["A"]:
+        eventos_root = grupos["A"]
+    else:
+        eventos_root = eventos_sorted
 
     # -------------------------------------------------------------
-    # ACEITO (tb_satus_doc → fallback tb_status_doc) - mantido
+    # ACEITO (tb_satus_doc / tb_status_doc) – mesma lógica de antes
     # -------------------------------------------------------------
     comp_norm_input = _only_yyyymm(_normaliza_anomes(competencia) or competencia)
 
     def _column_exists(schema: str, table: str, column: str) -> bool:
         q = text("""
             SELECT 1
-            FROM information_schema.columns
-            WHERE table_schema = :schema
-              AND table_name   = :table
-              AND column_name  = :column
-            LIMIT 1
+              FROM information_schema.columns
+             WHERE table_schema = :schema
+               AND table_name   = :table
+               AND column_name  = :column
+             LIMIT 1
         """)
-        return db.execute(q, {"schema": schema, "table": table, "column": column}).first() is not None
+        return (
+            db.execute(q, {"schema": schema, "table": table, "column": column}).first()
+            is not None
+        )
 
     def _table_exists(schema: str, table: str) -> bool:
         q = text("""
             SELECT 1
-            FROM information_schema.tables
-            WHERE table_schema = :schema
-              AND table_name   = :table
-            LIMIT 1
+              FROM information_schema.tables
+             WHERE table_schema = :schema
+               AND table_name   = :table
+             LIMIT 1
         """)
         return db.execute(q, {"schema": schema, "table": table}).first() is not None
 
-    # ajuste o schema se necessário (ex.: 'app_rh')
     schema_status = "public"
-    table_try = "tb_satus_doc"   # com o "typo"
-    table_fbk = "tb_status_doc"  # sem typo
+    table_try = "tb_satus_doc"   # com typo
+    table_fbk = "tb_status_doc"  # correto
 
-    # escolhe a tabela existente
     table_name = None
     if _table_exists(schema_status, table_try):
-        table_name = f'{schema_status}.{table_try}'
+        table_name = f"{schema_status}.{table_try}"
     elif _table_exists(schema_status, table_fbk):
-        table_name = f'{schema_status}.{table_fbk}'
+        table_name = f"{schema_status}.{table_fbk}"
 
-    aceito_bool = False  # default
+    aceito_bool = False
 
     if table_name:
-        # checa colunas disponíveis
         raw_table = table_name.split(".")[1]
         has_comp = _column_exists(schema_status, raw_table, "competencia")
         has_data = _column_exists(schema_status, raw_table, "data")
@@ -637,11 +687,14 @@ def buscar_holerite(
         elif has_data:
             comp_norm_expr = """
                 COALESCE(
-                    to_char(CASE
-                                WHEN sd.data ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
-                                THEN to_date(sd.data, 'YYYY-MM-DD')
-                                ELSE NULL
-                            END, 'YYYYMM'),
+                    to_char(
+                        CASE
+                            WHEN sd.data ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+                            THEN to_date(sd.data, 'YYYY-MM-DD')
+                            ELSE NULL
+                        END,
+                        'YYYYMM'
+                    ),
                     substr(regexp_replace(TRIM(sd.data), '[^0-9]', '', 'g'), 1, 6)
                 )
             """
@@ -658,18 +711,21 @@ def buscar_holerite(
         sql_aceite = text(f"""
             SELECT
                 (ARRAY_AGG(sd.aceito ORDER BY {order_by_sql}))[1] AS aceito
-            FROM {table_name} sd
-            WHERE TRIM(sd.cpf::text) = TRIM(:cpf)
-              AND TRIM(sd.matricula::text) = TRIM(:matricula)
-              AND {comp_norm_expr} = :comp_norm
+              FROM {table_name} sd
+             WHERE TRIM(sd.cpf::text)       = TRIM(:cpf)
+               AND TRIM(sd.matricula::text) = TRIM(:matricula)
+               AND {comp_norm_expr}         = :comp_norm
         """)
 
         try:
-            val = db.execute(sql_aceite, {
-                "cpf": cpf,
-                "matricula": matricula,
-                "comp_norm": comp_norm_input
-            }).scalar()
+            val = db.execute(
+                sql_aceite,
+                {
+                    "cpf": cpf,
+                    "matricula": matricula,
+                    "comp_norm": comp_norm_input,
+                },
+            ).scalar()
             aceito_bool = bool(val) if val is not None else False
         except Exception:
             db.rollback()
@@ -682,16 +738,13 @@ def buscar_holerite(
         "empresa_utilizada": (cabecalho.get("cliente") if cabecalho else None),
         "cliente_nome_utilizado": (cabecalho.get("cliente_nome") if cabecalho else None),
         "matricula_utilizada": matricula,
-        "aceito": aceito_bool,  # bool (False quando não encontrado/NULL)
+        "aceito": aceito_bool,
         "cabecalho": cabecalho,
         "rodape": rodape,
-
-        # NOVO: blocos separados por tipo_calculo
-        "documentos": documentos,
-
-        # compat: eventos do Pagamento (P) ou Adiantamento (A)
-        "eventos": eventos_root
+        "documentos": documentos,   # blocos A/P
+        "eventos": eventos_root,    # compat – principal
     }
+
 
 def pad_left(valor: str, width: int) -> str:
     return str(valor).strip().zfill(width)
