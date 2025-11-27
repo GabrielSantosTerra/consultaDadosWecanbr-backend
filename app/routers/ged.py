@@ -1294,7 +1294,6 @@ def buscar_search_documentos_ano(
 
 @router.post("/documents/search/recibos")
 def buscar_search_documentos(payload: SearchDocumentosRequest, db: Session = Depends(get_db)):
-    # 1) autenticação no GED
     try:
         auth_key = login(
             conta=settings.GED_CONTA, usuario=settings.GED_USUARIO, senha=settings.GED_SENHA
@@ -1303,7 +1302,6 @@ def buscar_search_documentos(payload: SearchDocumentosRequest, db: Session = Dep
         raise HTTPException(502, f"Falha na autenticação no GED: {e}")
     headers = _headers(auth_key)
 
-    # 2) campos do template
     r_fields = requests.post(
         f"{BASE_URL}/templates/getfields",
         data={"id_template": payload.id_template},
@@ -1319,7 +1317,6 @@ def buscar_search_documentos(payload: SearchDocumentosRequest, db: Session = Dep
     if payload.campo_anomes not in nomes_campos:
         raise HTTPException(400, f"Campo '{payload.campo_anomes}' não existe no template")
 
-    # 3) monta cp[] na ordem do template
     lista_cp = ["" for _ in nomes_campos]
     for item in payload.cp:
         if item.nome not in nomes_campos:
@@ -1329,7 +1326,6 @@ def buscar_search_documentos(payload: SearchDocumentosRequest, db: Session = Dep
     def _campos_template_txt() -> str:
         return ", ".join(nomes_campos) if nomes_campos else "(vazio)"
 
-    # 4) chave composta: matricula (exato) + colaborador (aproximado %CPF%)
     if "matricula" not in nomes_campos:
         raise HTTPException(400, f"Template precisa ter 'matricula'. Campos: [{_campos_template_txt()}]")
     idx_matricula = nomes_campos.index("matricula")
@@ -1354,10 +1350,20 @@ def buscar_search_documentos(payload: SearchDocumentosRequest, db: Session = Dep
             "Não foi possível extrair um CPF válido (11 dígitos) do campo 'colaborador'. "
             "Envie 'colaborador' como 'NOME_99999999999' ou apenas os 11 dígitos do CPF."
         )
-
     lista_cp[idx_colaborador] = f"%{cpf_extraido}%"
 
-    # 5) se não informar anomes/anomes_in → lista meses por tipodedoc+matricula
+    # <<< NOVO: empresa como busca aproximada >>>
+    idx_empresa = None
+    for key in ("empresa", "cliente"):
+        idx_empresa = norm_map.get(_norm(key))
+        if idx_empresa is not None:
+            break
+
+    if idx_empresa is not None:
+        empresa_val = (lista_cp[idx_empresa] or "").strip()
+        if empresa_val:
+            lista_cp[idx_empresa] = f"%{empresa_val}%"
+
     if not payload.anomes and not payload.anomes_in:
         if "tipodedoc" not in nomes_campos:
             raise HTTPException(400, "Campo 'tipodedoc' não existe no template")
@@ -1413,7 +1419,6 @@ def buscar_search_documentos(payload: SearchDocumentosRequest, db: Session = Dep
                 return {"anomes": meses_sorted_objs}
             raise HTTPException(404, "Nenhum mês disponível para os parâmetros enviados.")
 
-    # 6) filtra por anomes/anomes_in (se vier)
     alvo: Set[str] = set()
     if payload.anomes:
         n = _normaliza_anomes(payload.anomes)
@@ -1427,7 +1432,6 @@ def buscar_search_documentos(payload: SearchDocumentosRequest, db: Session = Dep
                 raise HTTPException(400, f"Valor inválido em anomes_in: '{val}'")
             alvo.add(n)
 
-    # 7) executa a busca (já com colaborador = %CPF%)
     def _do_search(cp_override: Optional[List[str]] = None):
         form = [("id_tipo", str(payload.id_template))]
         form += [("cp[]", v) for v in (cp_override if cp_override is not None else lista_cp)]
@@ -1454,7 +1458,6 @@ def buscar_search_documentos(payload: SearchDocumentosRequest, db: Session = Dep
     except requests.RequestException as e:
         raise HTTPException(502, f"Falha ao consultar GED (search): {e}")
 
-    # 8) pós-processa e aplica filtro por meses
     filtrados: List[Dict[str, Any]] = []
     for d in documentos_total:
         bruto = str(d.get(payload.campo_anomes, "")).strip()
@@ -1468,7 +1471,6 @@ def buscar_search_documentos(payload: SearchDocumentosRequest, db: Session = Dep
 
     filtrados.sort(key=lambda x: x["_norm_anomes"], reverse=True)
 
-    # 9) <<< NOVO: calcular 'aceito' por documento (cpf + matricula + competencia YYYYMM)
     def __table_exists(schema: str, table: str) -> bool:
         q = text("""
             SELECT 1 FROM information_schema.tables
@@ -1546,12 +1548,10 @@ def buscar_search_documentos(payload: SearchDocumentosRequest, db: Session = Dep
             db.rollback()
             return False
 
-    # calcula aceito por mês (cacheando)
     meses_unicos = {d["_norm_anomes"] for d in filtrados}
     for m in meses_unicos:
         aceito_cache[m] = _aceito_for_comp(m)
 
-    # anexa o campo 'aceito' a cada documento
     for d in filtrados:
         d["aceito"] = bool(aceito_cache.get(d["_norm_anomes"], False))
 
