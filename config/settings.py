@@ -35,7 +35,10 @@ class Settings(BaseSettings):
 
     AUTO_TICKET_ON_CLOSE: bool = True
 
+    odoo_livechat_close_action_id: int | None = None
+
     class Config:
         env_file = ".env"
+
 
 settings = Settings()
