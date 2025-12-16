@@ -22,7 +22,7 @@ class OdooClient:
     - Odoo <=16:   canais = 'mail.channel' (legado).
     """
 
-    def _init_(self, url: str, db: str, user: str, password: str, timeout: int = 20):
+    def __init__(self, url: str, db: str, user: str, password: str, timeout: int = 20):
         self.url = url.rstrip("/")
         self.db = db
         self.user = user
