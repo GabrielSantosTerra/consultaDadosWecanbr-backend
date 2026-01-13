@@ -26,5 +26,6 @@ class Usuario(Base):
     id_pessoa = Column(Integer, ForeignKey('app_rh.tb_pessoa.id'), nullable=False)
     email = Column(String(100), unique=True, nullable=False)
     senha = Column(String, nullable=False)
+    senha_trocada = Column(Boolean, nullable=False, default=False, server_default="false")
 
     pessoa = relationship("Pessoa", back_populates="usuarios")

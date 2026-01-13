@@ -18,6 +18,7 @@ class PessoaBase(BaseModel):
     data_nascimento: Optional[date]
     gestor: Optional[bool]
     rh: Optional[bool]
+
 class PessoaCreate(BaseModel):
     nome: str
     cpf: str
@@ -69,6 +70,7 @@ class PessoaResponse(BaseModel):
     gestor: Optional[bool]
     rh: Optional[bool]
     email: str
+    senha_trocada: bool = False
     dados: List[DadoItem]
 
 class CadastroColaborador(BaseModel):
@@ -86,3 +88,10 @@ class ColabResponse(BaseModel):
     centro_de_custo: Optional[str]
     matricula: Optional[str]
     email: str
+
+
+class AtualizarSenhaRequest(BaseModel):
+
+    cpf: str = Field(..., min_length=1)
+    senha_atual: str = Field(..., min_length=1)
+    nova_senha: str = Field(..., min_length=1)

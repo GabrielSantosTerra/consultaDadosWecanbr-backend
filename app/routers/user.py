@@ -12,7 +12,7 @@ from app.utils.password import gerar_hash_senha, verificar_senha
 from app.database.connection import get_db
 from app.models.user import Usuario, Pessoa
 from app.models.blacklist import TokenBlacklist
-from app.schemas.user import CadastroPessoa, UsuarioLogin, PessoaResponse, DadoItem
+from app.schemas.user import AtualizarSenhaRequest, CadastroPessoa, UsuarioLogin, PessoaResponse, DadoItem
 from app.utils.jwt_handler import criar_token, verificar_token, decode_token
 from dotenv import load_dotenv
 
@@ -226,6 +226,7 @@ def get_me(request: Request, db: Session = Depends(get_db)):
         centro_de_custo=getattr(pessoa, "centro_de_custo", None),
         gestor=bool(getattr(pessoa, "gestor", False)),
         rh=bool(getattr(pessoa, "rh", False)),
+        senha_trocada=bool(getattr(usuario, "senha_trocada", False)),  # <-- NOVO
         dados=dados,
     )
 
@@ -275,3 +276,51 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
     response.delete_cookie("logged_user", path="/", domain=cookie_domain)
 
     return {"message": "Logout realizado com sucesso"}
+
+@router.put("/user/update-password")
+def update_password(
+    body: AtualizarSenhaRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    access_token = request.cookies.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Token de autenticação ausente")
+
+    payload = verificar_token(access_token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Token inválido")
+
+    jti = payload.get("jti")
+    if not jti:
+        raise HTTPException(status_code=401, detail="Token sem identificador único (jti)")
+
+    if db.query(TokenBlacklist).filter_by(jti=jti).first():
+        raise HTTPException(status_code=401, detail="Token expirado ou inválido")
+
+    pessoa_id = payload.get("id")
+    pessoa = db.query(Pessoa).filter(Pessoa.id == pessoa_id).first()
+    if not pessoa:
+        raise HTTPException(status_code=401, detail="Pessoa não encontrada")
+
+    usuario = db.query(Usuario).filter(Usuario.id_pessoa == pessoa.id).first()
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+
+    # Normaliza CPF (remove caracteres não numéricos) e compara
+    cpf_body = "".join(ch for ch in str(body.cpf or "") if ch.isdigit())
+    cpf_pessoa = "".join(ch for ch in str(pessoa.cpf or "") if ch.isdigit())
+
+    if not cpf_body or cpf_body != cpf_pessoa:
+        raise HTTPException(status_code=403, detail="CPF não confere com o usuário autenticado")
+
+    usuario.senha = body.nova_senha
+    usuario.senha_trocada = True
+
+    db.add(usuario)
+    db.commit()
+
+    return {"message": "Senha atualizada com sucesso", "senha_trocada": True}
+
+    return {"message": "Senha atualizada com sucesso", "senha_trocada": True}
+
