@@ -94,4 +94,4 @@ class AtualizarSenhaRequest(BaseModel):
 
     cpf: str = Field(..., min_length=1)
     senha_atual: str = Field(..., min_length=1)
-    nova_senha: str = Field(..., min_length=1)
+    senha_nova: str = Field(..., min_length=1)

@@ -277,6 +277,10 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
 
     return {"message": "Logout realizado com sucesso"}
 
+from fastapi import HTTPException, Depends, Request
+from sqlalchemy.orm import Session
+from sqlalchemy import text
+
 @router.put("/user/update-password")
 def update_password(
     body: AtualizarSenhaRequest,
@@ -303,24 +307,62 @@ def update_password(
     if not pessoa:
         raise HTTPException(status_code=401, detail="Pessoa não encontrada")
 
-    usuario = db.query(Usuario).filter(Usuario.id_pessoa == pessoa.id).first()
-    if not usuario:
-        raise HTTPException(status_code=404, detail="Usuário não encontrado")
-
-    # Normaliza CPF (remove caracteres não numéricos) e compara
+    # Normaliza CPF enviado e CPF do usuário autenticado
     cpf_body = "".join(ch for ch in str(body.cpf or "") if ch.isdigit())
     cpf_pessoa = "".join(ch for ch in str(pessoa.cpf or "") if ch.isdigit())
 
     if not cpf_body or cpf_body != cpf_pessoa:
         raise HTTPException(status_code=403, detail="CPF não confere com o usuário autenticado")
 
-    usuario.senha = body.nova_senha
-    usuario.senha_trocada = True
+    if body.senha_atual == body.senha_nova:
+        raise HTTPException(status_code=400, detail="A nova senha não pode ser igual à senha antiga")
 
-    db.add(usuario)
+    # 1) Confere se existe ao menos um usuário daquele CPF com a senha atual informada
+    sql_check = text("""
+        SELECT 1
+        FROM app_rh.tb_usuario u
+        JOIN app_rh.tb_pessoa p ON p.id = u.id_pessoa
+        WHERE
+            regexp_replace(TRIM(p.cpf::text), '[^0-9]', '', 'g')
+                = regexp_replace(TRIM(:cpf), '[^0-9]', '', 'g')
+            AND COALESCE(u.senha::text, '') = :senha_atual
+        LIMIT 1
+    """)
+
+    ok = db.execute(
+        sql_check,
+        {"cpf": cpf_body, "senha_atual": body.senha_atual},
+    ).scalar()
+
+    if not ok:
+        raise HTTPException(status_code=400, detail="Senha antiga incorreta")
+
+    # 2) Atualiza TODOS os vínculos do CPF (todas as empresas)
+    sql_update = text("""
+        UPDATE app_rh.tb_usuario u
+        SET
+            senha = :senha_nova,
+            senha_trocada = TRUE
+        FROM app_rh.tb_pessoa p
+        WHERE
+            u.id_pessoa = p.id
+            AND regexp_replace(TRIM(p.cpf::text), '[^0-9]', '', 'g')
+                = regexp_replace(TRIM(:cpf), '[^0-9]', '', 'g')
+    """)
+
+    result = db.execute(
+        sql_update,
+        {"senha_nova": body.senha_nova, "cpf": cpf_body},
+    )
     db.commit()
 
-    return {"message": "Senha atualizada com sucesso", "senha_trocada": True}
+    updated_rows = result.rowcount or 0
+    if updated_rows == 0:
+        raise HTTPException(status_code=404, detail="Nenhum usuário encontrado para o CPF informado")
 
-    return {"message": "Senha atualizada com sucesso", "senha_trocada": True}
+    return {
+        "message": "Senha atualizada com sucesso",
+        "senha_trocada": True,
+        "usuarios_atualizados": updated_rows,
+    }
 
