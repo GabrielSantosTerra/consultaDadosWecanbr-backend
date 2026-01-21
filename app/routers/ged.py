@@ -1580,7 +1580,7 @@ def buscar_beneficios(payload: dict = Body(...), db: Session = Depends(get_db)):
         regexp_replace(TRIM(:competencia), '[^0-9]', '', 'g')
     """
 
-    sql_benef = text(f"""
+    sql_benef = text("""
         SELECT
             uuid::text AS uuid,
             empresa,
@@ -1590,17 +1590,20 @@ def buscar_beneficios(payload: dict = Body(...), db: Session = Depends(get_db)):
             cpf,
             competencia,
             lote,
-            evento,
-            evento_nome,
-            referencia,
-            valor,
-            tipo
-        FROM public.tb_beneficio_eventos
-        WHERE TRIM(cpf::text) = TRIM(:cpf)
-          AND TRIM(matricula::text) = TRIM(:matricula)
-          AND TRIM(cliente::text)   = TRIM(:empresa)
-          AND {filtro_comp}
-        ORDER BY evento
+            codigo_beneficio,
+            descricao_beneficio,
+            tipo_beneficio,
+            valor_unitario,
+            dia,
+            mes,
+            valor_total
+        FROM public.tb_beneficio_detalhes
+        WHERE TRIM(cpf::text)       = TRIM(:cpf)
+        AND TRIM(matricula::text) = TRIM(:matricula)
+        AND TRIM(cliente::text)   = TRIM(:empresa)
+        AND regexp_replace(TRIM(competencia), '[^0-9]', '', 'g') =
+            regexp_replace(TRIM(:competencia),  '[^0-9]', '', 'g')
+        ORDER BY tipo_beneficio, codigo_beneficio
     """)
     benef_rows = db.execute(
         sql_benef,
@@ -1662,14 +1665,14 @@ async def listar_competencias_beneficios(
 
     sql_lista_comp = text("""
         SELECT DISTINCT
-               regexp_replace(TRIM(competencia), '[^0-9]', '', 'g') AS comp
-          FROM tb_beneficio_eventos
-         WHERE TRIM(cpf::text) = TRIM(:cpf)
-           AND TRIM(matricula::text) = TRIM(:matricula)
-           AND TRIM(cliente::text)   = TRIM(:empresa)
-           AND competencia IS NOT NULL
-           AND regexp_replace(TRIM(competencia), '[^0-9]', '', 'g') ~ '^[0-9]{6}$'
-         ORDER BY comp DESC
+            regexp_replace(TRIM(competencia), '[^0-9]', '', 'g') AS comp
+        FROM public.tb_beneficio_detalhes
+        WHERE TRIM(cpf::text)       = TRIM(:cpf)
+        AND TRIM(matricula::text) = TRIM(:matricula)
+        AND TRIM(cliente::text)   = TRIM(:empresa)
+        AND competencia IS NOT NULL
+        AND regexp_replace(TRIM(competencia), '[^0-9]', '', 'g') ~ '^[0-9]{6}$'
+        ORDER BY comp DESC
     """)
 
     rows = db.execute(sql_lista_comp, params).fetchall()
@@ -1701,8 +1704,9 @@ def montar_beneficio(
     """
 
     # Busca eventos de benefícios
-    sql_benef = text(f"""
+    sql_benef = text("""
         SELECT
+            uuid::text AS uuid,
             empresa,
             filial,
             cliente,
@@ -1710,25 +1714,28 @@ def montar_beneficio(
             matricula,
             competencia,
             lote,
-            evento,
-            evento_nome,
-            referencia,
-            valor,
-            tipo
-        FROM public.tb_beneficio_eventos
-        WHERE TRIM(cpf::text) = TRIM(:cpf)
-          AND TRIM(matricula::text) = TRIM(:matricula)
-          AND {filtro_comp}
-        ORDER BY evento
+            codigo_beneficio,
+            descricao_beneficio,
+            tipo_beneficio,
+            valor_unitario,
+            dia,
+            mes,
+            valor_total
+        FROM public.tb_beneficio_detalhes
+        WHERE TRIM(cpf::text)       = TRIM(:cpf)
+        AND TRIM(matricula::text) = TRIM(:matricula)
+        AND regexp_replace(TRIM(competencia), '[^0-9]', '', 'g') =
+            regexp_replace(TRIM(:competencia),  '[^0-9]', '', 'g')
+        ORDER BY tipo_beneficio, codigo_beneficio
     """)
     result = db.execute(sql_benef, {"cpf": cpf, "matricula": matricula, "competencia": competencia}).fetchall()
     if not result:
         raise HTTPException(status_code=404, detail="Nenhum benefício encontrado para os critérios informados.")
 
-    eventos = [dict(r._mapping) for r in result]
+    beneficios = [dict(r._mapping) for r in result]
 
     # Dados gerais — pego da primeira linha (mesma matrícula/competência)
-    info = eventos[0]
+    info = beneficios[0]
     empresa = info.get("empresa", "")
     filial = info.get("filial", "")
     cliente = info.get("cliente", "")
@@ -1738,9 +1745,8 @@ def montar_beneficio(
     matricula = info.get("matricula", "")
 
     # Calcula totais
-    total_venc = sum(e["valor"] for e in eventos if e.get("tipo", "").upper() == "V")
-    total_desc = sum(e["valor"] for e in eventos if e.get("tipo", "").upper() == "D")
-    total_liquido = total_venc - total_desc
+    total_geral = sum((b.get("valor_total") or 0) for b in beneficios)
+
 
     # Formata PDF no estilo holerite
     pdf = FPDF(format='A4', unit='mm')
@@ -1760,34 +1766,39 @@ def montar_beneficio(
 
     # Cabeçalho da tabela
     pdf.set_font("Arial", 'B', 9)
-    pdf.cell(20, 6, "Evento", border=1)
-    pdf.cell(90, 6, "Descrição", border=1)
-    pdf.cell(30, 6, "Referência", border=1, align='R')
-    pdf.cell(25, 6, "Valor", border=1, align='R')
-    pdf.cell(25, 6, "Tipo", border=1, align='C')
+    pdf.cell(15, 6, "Cód.", border=1)
+    pdf.cell(80, 6, "Descrição do Benefício", border=1)
+    pdf.cell(35, 6, "Tipo de Benefício", border=1)
+    pdf.cell(18, 6, "Unitário", border=1, align='R')
+    pdf.cell(12, 6, "Dia", border=1, align='R')
+    pdf.cell(12, 6, "Mês", border=1, align='R')
+    pdf.cell(18, 6, "Total", border=1, align='R')
     pdf.ln(6)
 
     pdf.set_font("Arial", '', 9)
-    for evt in eventos:
-        pdf.cell(20, 6, str(evt["evento"]), border=1)
-        pdf.cell(90, 6, evt["evento_nome"], border=1)
-        pdf.cell(30, 6, f"{evt['referencia']}", border=1, align='R')
-        pdf.cell(25, 6, f"{evt['valor']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."), border=1, align='R')
-        pdf.cell(25, 6, evt["tipo"], border=1, align='C')
-        pdf.ln(6)
 
-    # Totais
-    pdf.ln(2)
-    pdf.set_font("Arial", 'B', 9)
-    pdf.cell(140, 6, "Total Vencimentos", border=1, align='R')
-    pdf.cell(40, 6, f"{total_venc:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."), border=1, align='R')
-    pdf.ln(6)
-    pdf.cell(140, 6, "Total Descontos", border=1, align='R')
-    pdf.cell(40, 6, f"{total_desc:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."), border=1, align='R')
-    pdf.ln(6)
-    pdf.cell(140, 6, "Valor Líquido", border=1, align='R')
-    pdf.cell(40, 6, f"{total_liquido:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."), border=1, align='R')
-    pdf.ln(12)
+    for b in beneficios:  # ou eventos, depende do nome da sua lista
+        codigo = b.get("codigo_beneficio", "")
+        desc = b.get("descricao_beneficio", "") or ""
+        tipo_b = b.get("tipo_beneficio", "") or ""
+
+        vu = b.get("valor_unitario") or 0
+        dia = b.get("dia") or 0
+        mes = b.get("mes") or 0
+        vt = b.get("valor_total") or 0
+
+        pdf.ln(2)
+        pdf.set_font("Arial", 'B', 9)
+        pdf.cell(172, 6, "Total Geral", border=1, align='R')
+        pdf.cell(
+            18, 6,
+            f"{total_geral:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."),
+            border=1,
+            align='R'
+        )
+        pdf.ln(12)
+
+
 
     # Assinatura
     pdf.set_font("Arial", '', 9)
@@ -1807,9 +1818,7 @@ def montar_beneficio(
         "filial": filial,
         "cliente": cliente,
         "lote": lote,
-        "total_vencimentos": total_venc,
-        "total_descontos": total_desc,
-        "valor_liquido": total_liquido,
-        "eventos": eventos,
+        "total_geral": total_geral,
+        "beneficios": beneficios,
         "pdf_base64": pdf_base64
     }
