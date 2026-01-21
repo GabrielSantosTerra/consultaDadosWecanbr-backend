@@ -14,6 +14,8 @@ from config.settings import settings
 from typing import List
 import base64
 from fpdf import FPDF # type: ignore
+from decimal import Decimal, InvalidOperation
+
 
 router = APIRouter()
 
@@ -1691,17 +1693,38 @@ def montar_beneficio(
     payload: dict = Body(...),
     db: Session = Depends(get_db)
 ):
-    cpf = (payload.get("cpf") or "").strip()
-    matricula = (payload.get("matricula") or "").strip()
-    competencia = (payload.get("competencia") or "").strip()
+    def as_str(v) -> str:
+        if v is None:
+            return ""
+        return str(v).strip()
+
+    def as_int(v, default: int = 0) -> int:
+        try:
+            if v is None or v == "":
+                return default
+            return int(float(v))
+        except Exception:
+            return default
+
+    def as_decimal(v) -> Decimal:
+        if v is None or v == "":
+            return Decimal("0")
+        try:
+            return Decimal(str(v))
+        except (InvalidOperation, ValueError):
+            return Decimal("0")
+
+    def fmt_money(v) -> str:
+        d = as_decimal(v)
+        s = f"{d:,.2f}"
+        return s.replace(",", "X").replace(".", ",").replace("X", ".")
+
+    cpf = as_str(payload.get("cpf"))
+    matricula = as_str(payload.get("matricula"))
+    competencia = as_str(payload.get("competencia"))
 
     if not cpf or not matricula or not competencia:
         raise HTTPException(status_code=422, detail="Informe cpf, matricula e competencia.")
-
-    filtro_comp = """
-        regexp_replace(TRIM(competencia), '[^0-9]', '', 'g') =
-        regexp_replace(TRIM(:competencia), '[^0-9]', '', 'g')
-    """
 
     # Busca eventos de benefícios
     sql_benef = text("""
@@ -1723,18 +1746,23 @@ def montar_beneficio(
             valor_total
         FROM public.tb_beneficio_detalhes
         WHERE TRIM(cpf::text)       = TRIM(:cpf)
-        AND TRIM(matricula::text) = TRIM(:matricula)
+        AND TRIM(matricula::text)  = TRIM(:matricula)
         AND regexp_replace(TRIM(competencia), '[^0-9]', '', 'g') =
             regexp_replace(TRIM(:competencia),  '[^0-9]', '', 'g')
         ORDER BY tipo_beneficio, codigo_beneficio
     """)
-    result = db.execute(sql_benef, {"cpf": cpf, "matricula": matricula, "competencia": competencia}).fetchall()
-    if not result:
+
+    rows = db.execute(
+        sql_benef,
+        {"cpf": cpf, "matricula": matricula, "competencia": competencia}
+    ).fetchall()
+
+    if not rows:
         raise HTTPException(status_code=404, detail="Nenhum benefício encontrado para os critérios informados.")
 
-    beneficios = [dict(r._mapping) for r in result]
+    beneficios = [dict(r._mapping) for r in rows]
 
-    # Dados gerais — pego da primeira linha (mesma matrícula/competência)
+    # Dados gerais — da primeira linha
     info = beneficios[0]
     empresa = info.get("empresa", "")
     filial = info.get("filial", "")
@@ -1744,70 +1772,78 @@ def montar_beneficio(
     cpf = info.get("cpf", "")
     matricula = info.get("matricula", "")
 
-    # Calcula totais
-    total_geral = sum((b.get("valor_total") or 0) for b in beneficios)
+    # Totais (Decimal)
+    total_geral = sum((as_decimal(b.get("valor_total")) for b in beneficios), Decimal("0"))
 
-
-    # Formata PDF no estilo holerite
-    pdf = FPDF(format='A4', unit='mm')
+    # PDF
+    pdf = FPDF(format="A4", unit="mm")
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
 
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 6, "Recibo de Benefícios", ln=0)
-    pdf.ln(8)
+    # Título
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 6, "Recibo de Benefícios", ln=1)
+    pdf.ln(2)
 
-    pdf.set_font("Arial", '', 9)
+    # Cabeçalho
+    pdf.set_font("Arial", "", 9)
     pdf.cell(100, 5, f"Empresa: {empresa} - Filial: {filial}", ln=0)
     pdf.cell(0, 5, f"Cliente: {cliente}", ln=1)
     pdf.cell(0, 5, f"Competência: {competencia}   Lote: {lote}", ln=1)
     pdf.cell(0, 5, f"CPF: {cpf}   Matrícula: {matricula}", ln=1)
-    pdf.ln(4)
+    pdf.ln(3)
 
-    # Cabeçalho da tabela
-    pdf.set_font("Arial", 'B', 9)
+    # Tabela - cabeçalho
+    pdf.set_font("Arial", "B", 9)
     pdf.cell(15, 6, "Cód.", border=1)
     pdf.cell(80, 6, "Descrição do Benefício", border=1)
     pdf.cell(35, 6, "Tipo de Benefício", border=1)
-    pdf.cell(18, 6, "Unitário", border=1, align='R')
-    pdf.cell(12, 6, "Dia", border=1, align='R')
-    pdf.cell(12, 6, "Mês", border=1, align='R')
-    pdf.cell(18, 6, "Total", border=1, align='R')
+    pdf.cell(18, 6, "Unitário", border=1, align="R")
+    pdf.cell(12, 6, "Dia", border=1, align="R")
+    pdf.cell(12, 6, "Mês", border=1, align="R")
+    pdf.cell(18, 6, "Total", border=1, align="R")
     pdf.ln(6)
 
-    pdf.set_font("Arial", '', 9)
+    # Tabela - linhas
+    pdf.set_font("Arial", "", 9)
 
-    for b in beneficios:  # ou eventos, depende do nome da sua lista
-        codigo = b.get("codigo_beneficio", "")
-        desc = b.get("descricao_beneficio", "") or ""
-        tipo_b = b.get("tipo_beneficio", "") or ""
+    for b in beneficios:
+        codigo = as_str(b.get("codigo_beneficio"))
+        desc = as_str(b.get("descricao_beneficio"))
+        tipo_b = as_str(b.get("tipo_beneficio"))
 
-        vu = b.get("valor_unitario") or 0
-        dia = b.get("dia") or 0
-        mes = b.get("mes") or 0
-        vt = b.get("valor_total") or 0
+        vu = b.get("valor_unitario")
+        dia = as_int(b.get("dia"))
+        mes = as_int(b.get("mes"))
+        vt = b.get("valor_total")
 
-        pdf.ln(2)
-        pdf.set_font("Arial", 'B', 9)
-        pdf.cell(172, 6, "Total Geral", border=1, align='R')
-        pdf.cell(
-            18, 6,
-            f"{total_geral:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."),
-            border=1,
-            align='R'
-        )
-        pdf.ln(12)
+        # cortes simples para não estourar célula (FPDF cell não quebra linha)
+        desc_cell = desc[:60]
+        tipo_cell = tipo_b[:25]
 
+        pdf.cell(15, 6, codigo, border=1)
+        pdf.cell(80, 6, desc_cell, border=1)
+        pdf.cell(35, 6, tipo_cell, border=1)
+        pdf.cell(18, 6, fmt_money(vu), border=1, align="R")
+        pdf.cell(12, 6, str(dia), border=1, align="R")
+        pdf.cell(12, 6, str(mes), border=1, align="R")
+        pdf.cell(18, 6, fmt_money(vt), border=1, align="R")
+        pdf.ln(6)
 
+    # Total geral (uma vez)
+    pdf.ln(2)
+    pdf.set_font("Arial", "B", 9)
+    pdf.cell(172, 6, "Total Geral", border=1, align="R")
+    pdf.cell(18, 6, fmt_money(total_geral), border=1, align="R")
+    pdf.ln(10)
 
     # Assinatura
-    pdf.set_font("Arial", '', 9)
+    pdf.set_font("Arial", "", 9)
     pdf.cell(0, 6, "Assinatura: _________________________________________", ln=1)
-    pdf.ln(10)
-    pdf.cell(0, 6, "Data: ____/____/____", ln=1, align='R')
+    pdf.ln(6)
+    pdf.cell(0, 6, "Data: ____/____/____", ln=1, align="R")
 
-    # Gera base64
-    raw_pdf = pdf.output(dest='S').encode('latin-1')
+    raw_pdf = pdf.output(dest="S").encode("latin-1")
     pdf_base64 = base64.b64encode(raw_pdf).decode("utf-8")
 
     return {
@@ -1818,7 +1854,7 @@ def montar_beneficio(
         "filial": filial,
         "cliente": cliente,
         "lote": lote,
-        "total_geral": total_geral,
+        "total_geral": float(total_geral),  # se você preferir Decimal->str, eu ajusto
         "beneficios": beneficios,
-        "pdf_base64": pdf_base64
+        "pdf_base64": pdf_base64,
     }
