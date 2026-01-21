@@ -370,6 +370,7 @@ async def listar_competencias_holerite(
             WHERE TRIM(c.cpf::text) = TRIM(:cpf)
               AND TRIM(c.matricula::text) = TRIM(:matricula)
               AND TRIM(c.cliente::text)   = TRIM(:empresa)
+              AND coalesce(c.pagamento, '2999-12-31')::date < current_date - 1
               AND c.competencia IS NOT NULL
         ),
         norm_rod AS (
@@ -506,6 +507,7 @@ def buscar_holerite(
                  WHERE TRIM(c.cpf::text)       = TRIM(:cpf)
                    AND TRIM(c.matricula::text) = TRIM(:matricula)
                    AND TRIM(c.cliente::text)   = TRIM(:empresa)
+                   AND coalesce(c.pagamento, '2999-12-31')::date < current_date - 1
                    AND {filtro_comp_cab}
                    AND c.lote = :lote
                  LIMIT 1
@@ -517,6 +519,7 @@ def buscar_holerite(
                  WHERE TRIM(c.cpf::text)       = TRIM(:cpf)
                    AND TRIM(c.matricula::text) = TRIM(:matricula)
                    AND TRIM(c.cliente::text)   = TRIM(:empresa)
+                   AND coalesce(c.pagamento, '2999-12-31')::date < current_date - 1
                    AND {filtro_comp_cab}
                  ORDER BY lote DESC NULLS LAST
                  LIMIT 1
