@@ -140,12 +140,9 @@ def get_me(request: Request, db: Session = Depends(get_db)):
     if not usuario:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
 
-    # normaliza CPF e matrícula
     cpf_pessoa = str(pessoa.cpf or "").strip()
     mat_pessoa = str(getattr(pessoa, "matricula", "") or "").strip()
 
-    # 1) Busca TODOS os clientes que aparecem em tb_holerite_cabecalhos
-    #    para o CPF OU para a matrícula da pessoa
     sql_dados = text("""
         SELECT DISTINCT
                TRIM(c.cliente::text)   AS id,
@@ -161,27 +158,25 @@ def get_me(request: Request, db: Session = Depends(get_db)):
             )
           AND c.matricula IS NOT NULL AND TRIM(c.matricula::text) <> ''
           AND c.cliente  IS NOT NULL AND TRIM(c.cliente::text)  <> ''
-        ORDER BY nome NULLS LAST, id, mat
+          AND c.cliente_nome IS NOT NULL AND TRIM(c.cliente_nome) <> ''   -- <<< NOVO
+        ORDER BY nome, id, mat
     """)
 
-    rows = db.execute(
-        sql_dados,
-        {"cpf": cpf_pessoa, "matricula": mat_pessoa},
-    ).fetchall()
+    rows = db.execute(sql_dados, {"cpf": cpf_pessoa, "matricula": mat_pessoa}).fetchall()
 
+    # Só entra em dados se tiver nome válido
     dados: List[DadoItem] = [
         DadoItem(id=row[0], nome=row[1], matricula=row[2])
         for row in rows
+        if row[1] and str(row[1]).strip()
     ]
 
-    # mapa cliente_id -> nome, quando já conhecido
     nomes_por_cliente = {
-        str(row[0]).strip(): row[1]
+        str(row[0]).strip(): str(row[1]).strip()
         for row in rows
-        if row[1]
+        if row[1] and str(row[1]).strip()
     }
 
-    # 2) Garante que o cliente principal da tabela Pessoa também esteja em "dados"
     if mat_pessoa and getattr(pessoa, "cliente", None):
         cli_pessoa = str(pessoa.cliente).strip()
 
@@ -193,7 +188,6 @@ def get_me(request: Request, db: Session = Depends(get_db)):
         if not ja_existe_vinculo:
             nome_cliente = nomes_por_cliente.get(cli_pessoa)
 
-            # fallback: tenta descobrir o nome do cliente em QUALQUER holerite desse cliente
             if not nome_cliente:
                 sql_nome_cliente = text("""
                     SELECT TRIM(c.cliente_nome) AS nome
@@ -204,19 +198,18 @@ def get_me(request: Request, db: Session = Depends(get_db)):
                     ORDER BY c.cliente_nome
                     LIMIT 1
                 """)
-                nome_cliente = db.execute(
-                    sql_nome_cliente,
-                    {"cliente": cli_pessoa},
-                ).scalar()
+                nome_cliente = db.execute(sql_nome_cliente, {"cliente": cli_pessoa}).scalar()
 
-            dados.insert(
-                0,
-                DadoItem(
-                    id=cli_pessoa,
-                    nome=nome_cliente,
-                    matricula=mat_pessoa,
-                ),
-            )
+            # <<< NOVO: só insere se tiver nome válido >>>
+            if nome_cliente and str(nome_cliente).strip():
+                dados.insert(
+                    0,
+                    DadoItem(
+                        id=cli_pessoa,
+                        nome=str(nome_cliente).strip(),
+                        matricula=mat_pessoa,
+                    ),
+                )
 
     return PessoaResponse(
         nome=pessoa.nome,
@@ -226,7 +219,7 @@ def get_me(request: Request, db: Session = Depends(get_db)):
         centro_de_custo=getattr(pessoa, "centro_de_custo", None),
         gestor=bool(getattr(pessoa, "gestor", False)),
         rh=bool(getattr(pessoa, "rh", False)),
-        senha_trocada=bool(getattr(usuario, "senha_trocada", False)),  # <-- NOVO
+        senha_trocada=bool(getattr(usuario, "senha_trocada", False)),
         dados=dados,
     )
 
