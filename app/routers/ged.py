@@ -558,7 +558,7 @@ def buscar_holerite(payload: BuscarHolerite = Body(...), db: Session = Depends(g
             SELECT
                 c.*,
                 c.uuid::text AS uuid,
-                c.pagamento::date AS pagamento
+                UPPER(TRIM(c.tipo_calculo::text)) AS tipo_calculo
             FROM tb_holerite_cabecalhos c
             WHERE c.uuid::text = :uuid
             LIMIT 1
@@ -569,12 +569,8 @@ def buscar_holerite(payload: BuscarHolerite = Body(...), db: Session = Depends(g
             continue
         cabecalho = dict(zip(cab_res.keys(), cab_row))
 
-        pgto = cabecalho.get("pagamento")
-        if pgto is not None:
-            try:
-                cabecalho["pagamento"] = pgto.isoformat()
-            except Exception:
-                cabecalho["pagamento"] = str(pgto)
+        tc = (cabecalho.get("tipo_calculo") or "").strip().upper()
+        cabecalho["tipo_calculo"] = tc if tc in ("A", "P") else tc
 
         # rodape
         sql_rod = text("""
@@ -623,10 +619,13 @@ def buscar_holerite(payload: BuscarHolerite = Body(...), db: Session = Depends(g
         if grupos["P"]:
             documentos.append({"tipo_calculo": "P", "descricao": "Pagamento", "eventos": grupos["P"]})
 
+        tc = (cabecalho.get("tipo_calculo") or "").strip().upper()
+
         holerites.append({
             "uuid": uuid,
             "aceito": aceito_bool,  # por competência
-            "pagamento": cabecalho.get("pagamento"),  # <<< NOVO (root)
+            "tipo_calculo": tc,      # <<< NOVO (root)
+            "descricao": "Adiantamento" if tc == "A" else ("Pagamento" if tc == "P" else None),
             "cabecalho": cabecalho,
             "rodape": rodape,
             "documentos": documentos,
