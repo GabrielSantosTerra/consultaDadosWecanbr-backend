@@ -555,16 +555,26 @@ def buscar_holerite(payload: BuscarHolerite = Body(...), db: Session = Depends(g
     for uuid in uuids:
         # cabecalho
         sql_cab = text("""
-            SELECT *
-              FROM tb_holerite_cabecalhos c
-             WHERE c.uuid::text = :uuid
-             LIMIT 1
+            SELECT
+                c.*,
+                c.uuid::text AS uuid,
+                c.pagamento::date AS pagamento
+            FROM tb_holerite_cabecalhos c
+            WHERE c.uuid::text = :uuid
+            LIMIT 1
         """)
         cab_res = db.execute(sql_cab, {"uuid": uuid})
         cab_row = cab_res.first()
         if not cab_row:
             continue
         cabecalho = dict(zip(cab_res.keys(), cab_row))
+
+        pgto = cabecalho.get("pagamento")
+        if pgto is not None:
+            try:
+                cabecalho["pagamento"] = pgto.isoformat()
+            except Exception:
+                cabecalho["pagamento"] = str(pgto)
 
         # rodape
         sql_rod = text("""
@@ -615,7 +625,8 @@ def buscar_holerite(payload: BuscarHolerite = Body(...), db: Session = Depends(g
 
         holerites.append({
             "uuid": uuid,
-            "aceito": aceito_bool,   # por competência
+            "aceito": aceito_bool,  # por competência
+            "pagamento": cabecalho.get("pagamento"),  # <<< NOVO (root)
             "cabecalho": cabecalho,
             "rodape": rodape,
             "documentos": documentos,
