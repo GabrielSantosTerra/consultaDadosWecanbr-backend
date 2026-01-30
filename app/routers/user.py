@@ -3,6 +3,7 @@ import os
 import re
 import secrets
 from datetime import datetime, timedelta
+import traceback
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -232,52 +233,90 @@ def registrar_usuario(
     response_model=None,
     status_code=status.HTTP_200_OK
 )
+@router.post(
+    "/user/login",
+    response_model=None,
+    status_code=status.HTTP_200_OK
+)
 def login_user(
     payload: UsuarioLogin,
     db: Session = Depends(get_db),
 ):
-    # helper para distinguir e-mail vs CPF
-    def is_email(valor: str) -> bool:
-        return re.match(r"[^@]+@[^@]+\.[^@]+", valor) is not None
+    print("[LOGIN] Requisição recebida:", {"usuario": payload.usuario})
 
-    # busca por e-mail ou CPF
-    if is_email(payload.usuario):
-        usuario = db.query(Usuario).filter(Usuario.email == payload.usuario).first()
-    else:
-        pessoa = db.query(Pessoa).filter(Pessoa.cpf == payload.usuario).first()
-        if not pessoa:
+    try:
+        # helper para distinguir e-mail vs CPF
+        def is_email(valor: str) -> bool:
+            return re.match(r"[^@]+@[^@]+\.[^@]+", valor) is not None
+
+        # busca por e-mail ou CPF
+        if is_email(payload.usuario):
+            print("[LOGIN] Tipo: email")
+            usuario = db.query(Usuario).filter(Usuario.email == payload.usuario).first()
+        else:
+            print("[LOGIN] Tipo: cpf")
+            pessoa = db.query(Pessoa).filter(Pessoa.cpf == payload.usuario).first()
+
+            if not pessoa:
+                print("[LOGIN] Pessoa não encontrada para CPF:", payload.usuario)
+                raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
+
+            print("[LOGIN] Pessoa encontrada:", {"id": pessoa.id, "cpf": pessoa.cpf})
+            usuario = db.query(Usuario).filter(Usuario.id_pessoa == pessoa.id).first()
+
+        if not usuario:
+            print("[LOGIN] Usuário não encontrado (tb_usuario) para:", payload.usuario)
             raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
-        usuario = db.query(Usuario).filter(Usuario.id_pessoa == pessoa.id).first()
 
-    if not usuario or not payload.senha == usuario.senha:
-        raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
+        # cuidado: NÃO logar senha
+        print("[LOGIN] Usuário encontrado:", {"id": usuario.id, "id_pessoa": usuario.id_pessoa, "email": usuario.email})
 
-    # geração dos tokens
-    access_token = criar_token(
-        {"id": usuario.id_pessoa, "sub": usuario.email, "tipo": "access"},
-        expires_in=60 * 24 * 7
-    )
-    refresh_token = criar_token(
-        {"id": usuario.id_pessoa, "sub": usuario.email, "tipo": "refresh"},
-        expires_in=60 * 24 * 30
-    )
+        if payload.senha != usuario.senha:
+            print("[LOGIN] Senha inválida para usuário:", usuario.email)
+            raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
 
-    # monta a resposta com cookies
-    response = JSONResponse(content={"message": "Login com sucesso"})
-    response.set_cookie(
-        "access_token", access_token,
-        httponly=True, max_age=60 * 60 * 24 * 7, path="/", **cookie_env
-    )
-    response.set_cookie(
-        "refresh_token", refresh_token,
-        httponly=True, max_age=60 * 60 * 24 * 30, path="/", **cookie_env
-    )
-    response.set_cookie(
-        "logged_user", "true",
-        httponly=False, max_age=60 * 60 * 24 * 7, path="/", **cookie_env
-    )
+        print("[LOGIN] Senha OK, gerando tokens...")
 
-    return response
+        # geração dos tokens
+        access_token = criar_token(
+            {"id": usuario.id_pessoa, "sub": usuario.email, "tipo": "access"},
+            expires_in=60 * 24 * 7
+        )
+        refresh_token = criar_token(
+            {"id": usuario.id_pessoa, "sub": usuario.email, "tipo": "refresh"},
+            expires_in=60 * 24 * 30
+        )
+
+        print("[LOGIN] Tokens gerados, setando cookies...")
+
+        # monta a resposta com cookies
+        response = JSONResponse(content={"message": "Login com sucesso"})
+        response.set_cookie(
+            "access_token", access_token,
+            httponly=True, max_age=60 * 60 * 24 * 7, path="/", **cookie_env
+        )
+        response.set_cookie(
+            "refresh_token", refresh_token,
+            httponly=True, max_age=60 * 60 * 24 * 30, path="/", **cookie_env
+        )
+        response.set_cookie(
+            "logged_user", "true",
+            httponly=False, max_age=60 * 60 * 24 * 7, path="/", **cookie_env
+        )
+
+        print("[LOGIN] OK - resposta retornada.")
+        return response
+
+    except HTTPException as e:
+        # erros esperados (401/403/400 etc) — não vira 500
+        print("[LOGIN] HTTPException:", {"status": e.status_code, "detail": e.detail})
+        raise
+
+    except Exception as e:
+        # aqui está o 500 real
+        print("[LOGIN] ERRO 500:", repr(e))
+        print("[LOGIN] TRACEBACK:\n", traceback.format_exc())
+        raise HTTPException(status_code=500, detail="Erro interno no login")
 
 @router.get("/user/me", response_model=PessoaResponse)
 def get_me(request: Request, db: Session = Depends(get_db)):
