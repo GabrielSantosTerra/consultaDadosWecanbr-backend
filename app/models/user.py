@@ -15,6 +15,8 @@ class Pessoa(Base):
     data_nascimento = Column(Date, nullable=True)
     gestor = Column(Boolean, default=False)
     rh = Column(Boolean, default=False)
+    interno = Column(Boolean, nullable=False, default=False, server_default="false")
+    email = Column(String(100), nullable=True)
 
     usuarios = relationship("Usuario", back_populates="pessoa")
 

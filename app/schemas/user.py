@@ -18,6 +18,8 @@ class PessoaBase(BaseModel):
     data_nascimento: Optional[date]
     gestor: Optional[bool]
     rh: Optional[bool]
+    interno: Optional[bool] = False
+    email: Optional[EmailStr] = None
 
 class PessoaCreate(BaseModel):
     nome: str
@@ -28,6 +30,8 @@ class PessoaCreate(BaseModel):
     gestor: bool
     rh: bool
     data_nascimento: date
+    interno: bool = False
+    email: Optional[EmailStr] = None
 
 class PessoaRead(PessoaBase):
     id: int
@@ -72,6 +76,8 @@ class PessoaResponse(BaseModel):
     email: str
     senha_trocada: bool = False
     dados: List[DadoItem]
+    interno: bool = False
+    email_pessoa: Optional[EmailStr] = None
 
 class CadastroColaborador(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -95,3 +101,14 @@ class AtualizarSenhaRequest(BaseModel):
     cpf: str = Field(..., min_length=1)
     senha_atual: str = Field(..., min_length=1)
     senha_nova: str = Field(..., min_length=1)
+
+class InternalSendTokenResponse(BaseModel):
+    ok: bool
+    message: str
+
+class InternalValidateTokenRequest(BaseModel):
+    token: str = Field(..., min_length=1)
+
+class InternalValidateTokenResponse(BaseModel):
+    valid: bool
+    reason: Optional[str] = None

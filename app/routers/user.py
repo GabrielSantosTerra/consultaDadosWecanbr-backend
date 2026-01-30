@@ -1,19 +1,32 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from fastapi.responses import JSONResponse
-from sqlalchemy.orm import Session
-from sqlalchemy import text
-from app.utils.jwt_handler import decode_token
-from datetime import datetime
-import re
+import hashlib
 import os
+import re
+import secrets
+from datetime import datetime, timedelta
 from typing import List
 
-from app.utils.password import gerar_hash_senha, verificar_senha
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
 from app.database.connection import get_db
-from app.models.user import Usuario, Pessoa
 from app.models.blacklist import TokenBlacklist
-from app.schemas.user import AtualizarSenhaRequest, CadastroPessoa, UsuarioLogin, PessoaResponse, DadoItem
-from app.utils.jwt_handler import criar_token, verificar_token, decode_token
+from app.models.token_interno import TokenInterno
+from app.models.user import Pessoa, Usuario
+from app.schemas.user import (
+    AtualizarSenhaRequest,
+    CadastroPessoa,
+    DadoItem,
+    PessoaResponse,
+    UsuarioLogin,
+    InternalSendTokenResponse,
+    InternalValidateTokenRequest,
+    InternalValidateTokenResponse,
+)
+from app.utils.email_sender import send_email_smtp
+from app.utils.jwt_handler import criar_token, decode_token, verificar_token
+from app.utils.password import gerar_hash_senha, verificar_senha
 from dotenv import load_dotenv
 
 router = APIRouter()
@@ -28,6 +41,143 @@ cookie_env = {
     "samesite": "Lax",
     "domain": cookie_domain
 }
+
+def _norm_digits(v: str) -> str:
+    return "".join(ch for ch in str(v or "") if ch.isdigit())
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+def _token_is_expired(data_criacao, hora_criacao, tempo_expiracao_min: int) -> bool:
+    # data_criacao: date, hora_criacao: time
+    created_dt = datetime.combine(data_criacao, hora_criacao)
+    exp_dt = created_dt + timedelta(minutes=int(tempo_expiracao_min or 0))
+    return datetime.now() > exp_dt
+
+@router.post(
+    "/user/internal/send-token",
+    response_model=InternalSendTokenResponse,
+    status_code=status.HTTP_200_OK,
+)
+def internal_send_token(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    access_token = request.cookies.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Token de autenticação ausente")
+
+    payload = verificar_token(access_token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Token inválido")
+
+    pessoa_id = payload.get("id")
+    if not pessoa_id:
+        raise HTTPException(status_code=401, detail="Token sem id")
+
+    pessoa = db.query(Pessoa).filter(Pessoa.id == pessoa_id).first()
+    if not pessoa:
+        raise HTTPException(status_code=401, detail="Pessoa não encontrada")
+
+    if not bool(getattr(pessoa, "interno", False)):
+        raise HTTPException(status_code=403, detail="Pessoa não é interna")
+
+    email_destino = str(getattr(pessoa, "email", "") or "").strip().lower()
+    if not email_destino:
+        raise HTTPException(status_code=400, detail="Pessoa interna sem email cadastrado")
+
+    token_plain = secrets.token_urlsafe(24)
+    token_hash = _hash_token(token_plain)
+
+    db.query(TokenInterno).filter(
+        TokenInterno.id_pessoa == pessoa.id,
+        TokenInterno.inativo == False
+    ).update({"inativo": True}, synchronize_session=False)
+    db.commit()
+
+    novo = TokenInterno(
+        id_pessoa=pessoa.id,
+        token=token_hash,
+        tempo_expiracao_min=15,
+        inativo=False,
+    )
+    db.add(novo)
+    db.commit()
+
+    subject = "Seu token de validação (ZionDocs)"
+    body_text = (
+        f"Olá, {pessoa.nome}.\n\n"
+        f"Seu token de validação é:\n\n"
+        f"{token_plain}\n\n"
+        f"Esse token expira em 15 minutos.\n"
+        f"Se você não solicitou, ignore esta mensagem.\n"
+    )
+
+    try:
+        send_email_smtp(email_destino, subject, body_text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Falha ao enviar e-mail: {e}")
+
+    return InternalSendTokenResponse(ok=True, message="Token enviado para o e-mail")
+
+@router.post(
+    "/user/internal/validate-token",
+    response_model=InternalValidateTokenResponse,
+    status_code=status.HTTP_200_OK,
+)
+def internal_validate_token(
+    body: InternalValidateTokenRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    access_token = request.cookies.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Token de autenticação ausente")
+
+    payload = verificar_token(access_token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Token inválido")
+
+    pessoa_id = payload.get("id")
+    if not pessoa_id:
+        raise HTTPException(status_code=401, detail="Token sem id")
+
+    pessoa = db.query(Pessoa).filter(Pessoa.id == pessoa_id).first()
+    if not pessoa:
+        return InternalValidateTokenResponse(valid=False, reason="pessoa_not_found")
+
+    if not bool(getattr(pessoa, "interno", False)):
+        return InternalValidateTokenResponse(valid=False, reason="not_internal")
+
+    token_plain = str(body.token or "").strip()
+    if not token_plain:
+        return InternalValidateTokenResponse(valid=False, reason="token_empty")
+
+    token_hash = _hash_token(token_plain)
+
+    row = (
+        db.query(TokenInterno)
+        .filter(TokenInterno.id_pessoa == pessoa.id)
+        .filter(TokenInterno.token == token_hash)
+        .first()
+    )
+
+    if not row:
+        return InternalValidateTokenResponse(valid=False, reason="token_not_found")
+
+    if bool(row.inativo):
+        return InternalValidateTokenResponse(valid=False, reason="token_inactive")
+
+    if _token_is_expired(row.data_criacao, row.hora_criacao, row.tempo_expiracao_min):
+        row.inativo = True
+        db.commit()
+        return InternalValidateTokenResponse(valid=False, reason="token_expired")
+
+    row.inativo = True
+    db.commit()
+
+    return InternalValidateTokenResponse(valid=True, reason=None)
+
 
 @router.post(
     "/user/register",
@@ -220,6 +370,8 @@ def get_me(request: Request, db: Session = Depends(get_db)):
         gestor=bool(getattr(pessoa, "gestor", False)),
         rh=bool(getattr(pessoa, "rh", False)),
         senha_trocada=bool(getattr(usuario, "senha_trocada", False)),
+        interno=bool(getattr(pessoa, "interno", False)),
+        email_pessoa=(pessoa.email or None),
         dados=dados,
     )
 
