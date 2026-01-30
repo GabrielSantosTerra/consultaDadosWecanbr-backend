@@ -86,40 +86,24 @@ def internal_send_token(
     if not email_destino:
         raise HTTPException(status_code=400, detail="Pessoa interna sem email cadastrado")
 
-    # 1) Inativa somente tokens EXPIRADOS (não derruba tokens válidos)
-    tokens = (
-        db.query(TokenInterno)
-        .filter(TokenInterno.id_pessoa == pessoa.id)
-        .filter(TokenInterno.inativo == False)
-        .order_by(TokenInterno.id.desc())
-        .all()
-    )
-
-    ativos_validos: list[TokenInterno] = []
-    for t in tokens:
-        if _token_is_expired(t.data_criacao, t.hora_criacao, t.tempo_expiracao_min):
-            t.inativo = True
-        else:
-            ativos_validos.append(t)
-
-    db.commit()
-
-    # 2) Limita quantidade de tokens ativos (evita "lixo" no banco)
-    #    Mantém no máximo 3 tokens ativos; se passar, inativa os mais antigos
-    MAX_ATIVOS = 3
-    if len(ativos_validos) >= MAX_ATIVOS:
-        # ativos_validos está em ordem desc (mais novo -> mais antigo)
-        for t in ativos_validos[MAX_ATIVOS - 1:]:
-            t.inativo = True
-        db.commit()
-
-    # 3) Cria novo token (SEM inativar os válidos restantes)
     token_plain = secrets.token_urlsafe(24)
     token_hash = _hash_token(token_plain)
+
+    # inativa tokens antigos
+    db.query(TokenInterno).filter(
+        TokenInterno.id_pessoa == pessoa.id,
+        TokenInterno.inativo == False
+    ).update({"inativo": True}, synchronize_session=False)
+    db.commit()
+
+    # ✅ NOVO: grava data/hora usando o MESMO relógio do Python (servidor/app)
+    now = datetime.now()
 
     novo = TokenInterno(
         id_pessoa=pessoa.id,
         token=token_hash,
+        data_criacao=now.date(),
+        hora_criacao=now.time().replace(microsecond=0),
         tempo_expiracao_min=15,
         inativo=False,
     )
