@@ -62,58 +62,6 @@ def registrar_usuario(
 
     return pessoa
 
-# @router.post(
-#     "/user/login",
-#     response_model=None,
-#     status_code=status.HTTP_200_OK
-# )
-# def login_user(
-#     payload: UsuarioLogin,
-#     db: Session = Depends(get_db),
-# ):
-#     # helper para distinguir e-mail vs CPF
-#     def is_email(valor: str) -> bool:
-#         return re.match(r"[^@]+@[^@]+\.[^@]+", valor) is not None
-
-#     # busca por e-mail ou CPF
-#     if is_email(payload.usuario):
-#         usuario = db.query(Usuario).filter(Usuario.email == payload.usuario).first()
-#     else:
-#         pessoa = db.query(Pessoa).filter(Pessoa.cpf == payload.usuario).first()
-#         if not pessoa:
-#             raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
-#         usuario = db.query(Usuario).filter(Usuario.id_pessoa == pessoa.id).first()
-
-#     if not usuario or not payload.senha == usuario.senha:
-#         raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
-
-#     # geração dos tokens
-#     access_token = criar_token(
-#         {"id": usuario.id_pessoa, "sub": usuario.email, "tipo": "access"},
-#         expires_in=60 * 24 * 7
-#     )
-#     refresh_token = criar_token(
-#         {"id": usuario.id_pessoa, "sub": usuario.email, "tipo": "refresh"},
-#         expires_in=60 * 24 * 30
-#     )
-
-#     # monta a resposta com cookies
-#     response = JSONResponse(content={"message": "Login com sucesso"})
-#     response.set_cookie(
-#         "access_token", access_token,
-#         httponly=True, max_age=60 * 60 * 24 * 7, path="/", **cookie_env
-#     )
-#     response.set_cookie(
-#         "refresh_token", refresh_token,
-#         httponly=True, max_age=60 * 60 * 24 * 30, path="/", **cookie_env
-#     )
-#     response.set_cookie(
-#         "logged_user", "true",
-#         httponly=False, max_age=60 * 60 * 24 * 7, path="/", **cookie_env
-#     )
-
-#     return response
-
 @router.post(
     "/user/login",
     response_model=None,
