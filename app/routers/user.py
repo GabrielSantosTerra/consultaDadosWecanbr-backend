@@ -62,54 +62,135 @@ def registrar_usuario(
 
     return pessoa
 
+# @router.post(
+#     "/user/login",
+#     response_model=None,
+#     status_code=status.HTTP_200_OK
+# )
+# def login_user(
+#     payload: UsuarioLogin,
+#     db: Session = Depends(get_db),
+# ):
+#     # helper para distinguir e-mail vs CPF
+#     def is_email(valor: str) -> bool:
+#         return re.match(r"[^@]+@[^@]+\.[^@]+", valor) is not None
+
+#     # busca por e-mail ou CPF
+#     if is_email(payload.usuario):
+#         usuario = db.query(Usuario).filter(Usuario.email == payload.usuario).first()
+#     else:
+#         pessoa = db.query(Pessoa).filter(Pessoa.cpf == payload.usuario).first()
+#         if not pessoa:
+#             raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
+#         usuario = db.query(Usuario).filter(Usuario.id_pessoa == pessoa.id).first()
+
+#     if not usuario or not payload.senha == usuario.senha:
+#         raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
+
+#     # geração dos tokens
+#     access_token = criar_token(
+#         {"id": usuario.id_pessoa, "sub": usuario.email, "tipo": "access"},
+#         expires_in=60 * 24 * 7
+#     )
+#     refresh_token = criar_token(
+#         {"id": usuario.id_pessoa, "sub": usuario.email, "tipo": "refresh"},
+#         expires_in=60 * 24 * 30
+#     )
+
+#     # monta a resposta com cookies
+#     response = JSONResponse(content={"message": "Login com sucesso"})
+#     response.set_cookie(
+#         "access_token", access_token,
+#         httponly=True, max_age=60 * 60 * 24 * 7, path="/", **cookie_env
+#     )
+#     response.set_cookie(
+#         "refresh_token", refresh_token,
+#         httponly=True, max_age=60 * 60 * 24 * 30, path="/", **cookie_env
+#     )
+#     response.set_cookie(
+#         "logged_user", "true",
+#         httponly=False, max_age=60 * 60 * 24 * 7, path="/", **cookie_env
+#     )
+
+#     return response
+
 @router.post(
     "/user/login",
     response_model=None,
-    status_code=status.HTTP_200_OK
+    status_code=status.HTTP_200_OK,
 )
 def login_user(
     payload: UsuarioLogin,
     db: Session = Depends(get_db),
 ):
-    # helper para distinguir e-mail vs CPF
     def is_email(valor: str) -> bool:
-        return re.match(r"[^@]+@[^@]+\.[^@]+", valor) is not None
+        return re.match(r"[^@]+@[^@]+\.[^@]+", (valor or "").strip()) is not None
 
-    # busca por e-mail ou CPF
-    if is_email(payload.usuario):
-        usuario = db.query(Usuario).filter(Usuario.email == payload.usuario).first()
+    usuario_input = (payload.usuario or "").strip()
+
+    if is_email(usuario_input):
+        usuario = db.query(Usuario).filter(Usuario.email == usuario_input).first()
     else:
-        pessoa = db.query(Pessoa).filter(Pessoa.cpf == payload.usuario).first()
+        cpf_input = usuario_input
+        pessoa = db.query(Pessoa).filter(Pessoa.cpf == cpf_input).first()
         if not pessoa:
             raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
         usuario = db.query(Usuario).filter(Usuario.id_pessoa == pessoa.id).first()
 
-    if not usuario or not payload.senha == usuario.senha:
+    if not usuario or payload.senha != usuario.senha:
         raise HTTPException(status_code=401, detail="Usuário ou senha inválidos")
 
-    # geração dos tokens
+    # padronizado em SEGUNDOS
+    access_expires = 60 * 60 * 24 * 7      # 7 dias
+    refresh_expires = 60 * 60 * 24 * 30    # 30 dias
+
     access_token = criar_token(
         {"id": usuario.id_pessoa, "sub": usuario.email, "tipo": "access"},
-        expires_in=60 * 24 * 7
+        expires_in=access_expires,
     )
     refresh_token = criar_token(
         {"id": usuario.id_pessoa, "sub": usuario.email, "tipo": "refresh"},
-        expires_in=60 * 24 * 30
+        expires_in=refresh_expires,
     )
 
-    # monta a resposta com cookies
     response = JSONResponse(content={"message": "Login com sucesso"})
+
+    # cookie_env precisa ser dict; remove chaves que gerariam duplicidade
+    base_env = cookie_env if isinstance(cookie_env, dict) else {}
+    base_env = {k: v for k, v in base_env.items() if v is not None}
+
+    for k in ("httponly", "max_age", "expires", "path"):
+        base_env.pop(k, None)
+
+    # valida/normaliza samesite
+    if "samesite" in base_env and isinstance(base_env["samesite"], str):
+        base_env["samesite"] = base_env["samesite"].lower()
+        if base_env["samesite"] not in ("lax", "strict", "none"):
+            base_env.pop("samesite", None)
+
     response.set_cookie(
-        "access_token", access_token,
-        httponly=True, max_age=60 * 60 * 24 * 7, path="/", **cookie_env
+        key="access_token",
+        value=access_token,
+        httponly=True,
+        max_age=access_expires,
+        path="/",
+        **base_env,
     )
     response.set_cookie(
-        "refresh_token", refresh_token,
-        httponly=True, max_age=60 * 60 * 24 * 30, path="/", **cookie_env
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        max_age=refresh_expires,
+        path="/",
+        **base_env,
     )
     response.set_cookie(
-        "logged_user", "true",
-        httponly=False, max_age=60 * 60 * 24 * 7, path="/", **cookie_env
+        key="logged_user",
+        value="true",
+        httponly=False,
+        max_age=access_expires,
+        path="/",
+        **base_env,
     )
 
     return response
